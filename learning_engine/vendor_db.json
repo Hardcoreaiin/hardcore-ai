@@ -1,0 +1,58 @@
+{
+  "MCU": {
+    "STM32H7": {
+      "manufacturer": "STMicroelectronics",
+      "core": "Cortex-M7",
+      "max_frequency": "480MHz",
+      "ram_support": ["External SDRAM", "Internal SRAM (1MB)"],
+      "flash_support": ["QSPI", "Internal Flash (2MB)"],
+      "security": ["TrustZone", "AES-256", "Secure Boot", "OTFDEC"],
+      "wireless": ["External via WiFi/BLE modules"],
+      "certifications": ["PSA Level 1", "SESIP Level 3"]
+    },
+    "nRF52840": {
+      "manufacturer": "Nordic Semiconductor",
+      "core": "Cortex-M4F",
+      "max_frequency": "64MHz",
+      "ram_support": ["Internal 256KB"],
+      "flash_support": ["Internal 1MB"],
+      "security": ["ARM TrustZone Cryptocell 310"],
+      "wireless": ["Bluetooth 5.4", "802.15.4", "Thread", "Zigbee"],
+      "certifications": ["SIG Bluetooth", "FCC", "CE"]
+    }
+  },
+  "MPU": {
+    "i.MX93": {
+      "manufacturer": "NXP",
+      "core": "Dual Cortex-A55 + Cortex-M33",
+      "max_frequency": "1.7GHz",
+      "ram_support": ["LPDDR4", "LPDDR4X (Up to 16GB supported by architecture)"],
+      "flash_support": ["eMMC 5.1", "SD 3.0", "FlexSPI"],
+      "security": ["EdgeLock Secure Enclave", "Secure Boot", "Hab", "TrustZone"],
+      "wireless": ["External modules (e.g., IW612 for WiFi 6/7)"],
+      "certifications": ["IEC 62443", "FIPS 140-3"]
+    },
+    "STM32MP1": {
+      "manufacturer": "STMicroelectronics",
+      "core": "Dual Cortex-A7 + Cortex-M4",
+      "max_frequency": "800MHz",
+      "ram_support": ["DDR3", "DDR3L", "LPDDR2", "LPDDR3"],
+      "flash_support": ["eMMC", "SD", "NAND", "NOR"],
+      "security": ["TrustZone", "Secure Boot", "ST-SAFE"],
+      "wireless": ["External"],
+      "certifications": ["PSA Level 1"]
+    }
+  },
+  "Wireless_Modules": {
+    "Murata_1DX": {
+      "chipset": "Infineon CYW4343W",
+      "protocols": ["WiFi 4", "BLE 5.1"],
+      "certifications": ["FCC", "IC", "CE", "TELEC"]
+    },
+    "u-blox_MAYA-W2": {
+      "chipset": "NXP IW612",
+      "protocols": ["WiFi 6", "BLE 5.2", "802.15.4"],
+      "certifications": ["Global"]
+    }
+  }
+}

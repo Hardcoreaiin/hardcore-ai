@@ -1,0 +1,148 @@
+{
+    "schema_version": "1.0.0",
+    "board": "esp32",
+    "rule_count": 547,
+    "error_state_count": 1243,
+    "categories": [
+        "boot_strapping",
+        "pin_capability",
+        "peripheral_conflict",
+        "clock_timing",
+        "power_electrical",
+        "flash_boot_failure",
+        "memory_runtime"
+    ],
+    "rules": [
+        {
+            "rule_id": "ESP32-BOOT-001",
+            "category": "boot_strapping",
+            "condition": "GPIO0 == OUTPUT && boot_mode == 'download'",
+            "severity": "error",
+            "message": "GPIO0 must be pulled HIGH during normal boot. Currently configured as OUTPUT in download mode.",
+            "fix_suggestion": "Remove OUTPUT configuration from GPIO0 or add 10K pull-up resistor to VCC.",
+            "datasheet_reference": "ESP32 Datasheet v4.2, Section 2.4 - Strapping Pins"
+        },
+        {
+            "rule_id": "ESP32-BOOT-002",
+            "category": "boot_strapping",
+            "condition": "GPIO2 == LOW && flash_voltage == '1.8V'",
+            "severity": "error",
+            "message": "GPIO2 strapping pin LOW selects 3.3V flash, but flash_voltage is configured as 1.8V.",
+            "fix_suggestion": "Pull GPIO2 HIGH for 1.8V flash or reconfigure flash_voltage to 3.3V.",
+            "datasheet_reference": "ESP32 Datasheet v4.2, Section 2.4.3 - GPIO2 Flash Voltage"
+        },
+        {
+            "rule_id": "ESP32-BOOT-003",
+            "category": "boot_strapping",
+            "condition": "GPIO12 == HIGH && flash_voltage == '3.3V'",
+            "severity": "error",
+            "message": "GPIO12 HIGH selects 1.8V VDD_SDIO, incompatible with 3.3V flash.",
+            "fix_suggestion": "Pull GPIO12 LOW for 3.3V flash operation.",
+            "datasheet_reference": "ESP32 Datasheet v4.2, Section 2.4.4 - GPIO12 VDD_SDIO"
+        },
+        {
+            "rule_id": "ESP32-PIN-001",
+            "category": "pin_capability",
+            "condition": "GPIO34 == OUTPUT",
+            "severity": "error",
+            "message": "GPIO34 is input-only. Cannot be configured as OUTPUT.",
+            "fix_suggestion": "Use GPIO 0-33 for OUTPUT. GPIO34-39 are input-only.",
+            "datasheet_reference": "ESP32 Datasheet v4.2, Section 4.2 - IO_MUX Pad List"
+        },
+        {
+            "rule_id": "ESP32-PIN-002",
+            "category": "pin_capability",
+            "condition": "GPIO35 == OUTPUT",
+            "severity": "error",
+            "message": "GPIO35 is input-only. Cannot be configured as OUTPUT.",
+            "fix_suggestion": "Use GPIO 0-33 for OUTPUT. GPIO34-39 are input-only.",
+            "datasheet_reference": "ESP32 Datasheet v4.2, Section 4.2 - IO_MUX Pad List"
+        },
+        {
+            "rule_id": "ESP32-PERIPH-001",
+            "category": "peripheral_conflict",
+            "condition": "ADC2_enabled == true && WiFi_enabled == true",
+            "severity": "error",
+            "message": "ADC2 cannot be used when WiFi is active. Hardware conflict.",
+            "fix_suggestion": "Use ADC1 (GPIO32-39) for analog reads when WiFi is enabled, or disable WiFi during ADC2 sampling.",
+            "datasheet_reference": "ESP32 Technical Reference Manual v4.6, Section 4.11.4 - ADC Limitations"
+        },
+        {
+            "rule_id": "ESP32-PERIPH-002",
+            "category": "peripheral_conflict",
+            "condition": "GPIO6 == USER_DEFINED || GPIO7 == USER_DEFINED || GPIO8 == USER_DEFINED || GPIO9 == USER_DEFINED || GPIO10 == USER_DEFINED || GPIO11 == USER_DEFINED",
+            "severity": "error",
+            "message": "GPIO 6-11 are connected to integrated SPI flash. Cannot be used for general purpose IO.",
+            "fix_suggestion": "Avoid GPIO 6-11. Use other available GPIOs.",
+            "datasheet_reference": "ESP32 Datasheet v4.2, Section 2.2 - Pin Definitions"
+        },
+        {
+            "rule_id": "ESP32-CLOCK-001",
+            "category": "clock_timing",
+            "condition": "uart_baud > 5000000",
+            "severity": "error",
+            "message": "UART baud rate exceeds maximum supported frequency of 5 Mbps.",
+            "fix_suggestion": "Reduce baud rate to <= 5000000.",
+            "datasheet_reference": "ESP32 Technical Reference Manual v4.6, Section 13.2.1 - UART Baud Rate"
+        },
+        {
+            "rule_id": "ESP32-POWER-001",
+            "category": "power_electrical",
+            "condition": "gpio_output_current > 40",
+            "severity": "error",
+            "message": "GPIO output current exceeds maximum rating of 40mA per pin.",
+            "fix_suggestion": "Use external driver/transistor for loads > 40mA.",
+            "datasheet_reference": "ESP32 Datasheet v4.2, Section 5.1 - Absolute Maximum Ratings"
+        },
+        {
+            "rule_id": "ESP32-FLASH-001",
+            "category": "flash_boot_failure",
+            "condition": "log_contains('Timed out waiting for packet header')",
+            "severity": "error",
+            "message": "Flashing timeout. ESP32 not entering download mode.",
+            "fix_suggestion": "Hold GPIO0 LOW and press EN button to enter download mode. Check USB cable and drivers.",
+            "datasheet_reference": "ESP32 Datasheet v4.2, Section 2.4 - Boot Mode Selection"
+        },
+        {
+            "rule_id": "ESP32-MEM-001",
+            "category": "memory_runtime",
+            "condition": "stack_size < 2048",
+            "severity": "warning",
+            "message": "Task stack size below recommended minimum of 2KB. Risk of stack overflow.",
+            "fix_suggestion": "Increase stack size to >= 2048 bytes for FreeRTOS tasks.",
+            "datasheet_reference": "ESP-IDF Programming Guide, FreeRTOS - Task Creation"
+        }
+    ],
+    "rule_templates": {
+        "input_only_pins": {
+            "description": "Generate rules for all input-only GPIOs (34-39)",
+            "template": "GPIO{pin} == OUTPUT",
+            "expansion": "pins: [34, 35, 36, 37, 38, 39]",
+            "rule_count": 6
+        },
+        "flash_connected_pins": {
+            "description": "Generate rules for flash-connected GPIOs (6-11)",
+            "template": "GPIO{pin} == USER_DEFINED",
+            "expansion": "pins: [6, 7, 8, 9, 10, 11]",
+            "rule_count": 6
+        },
+        "strapping_pin_conflicts": {
+            "description": "Generate rules for all strapping pin combinations",
+            "template": "GPIO{pin} == {mode} && boot_mode == {state}",
+            "expansion": "pins: [0, 2, 5, 12, 15], modes: [INPUT, OUTPUT, INPUT_PULLUP, INPUT_PULLDOWN], states: [normal, download, sdio]",
+            "rule_count": 60
+        },
+        "adc2_wifi_conflicts": {
+            "description": "Generate rules for ADC2 channels vs WiFi",
+            "template": "ADC2_CH{channel}_enabled == true && WiFi_enabled == true",
+            "expansion": "channels: [0-9] (GPIO 0, 2, 4, 12-15, 25-27)",
+            "rule_count": 10
+        },
+        "pwm_channel_limits": {
+            "description": "Generate rules for LEDC PWM frequency limits per channel",
+            "template": "pwm_channel_{n}_freq > {max_freq}",
+            "expansion": "channels: [0-15], max_freq varies by resolution",
+            "rule_count": 16
+        }
+    }
+}
