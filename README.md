@@ -1,0 +1,1 @@
+# Hardcoreai.v2
