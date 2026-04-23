@@ -1,1 +1,0 @@
-# HARDCOREAI Fault Decoder
