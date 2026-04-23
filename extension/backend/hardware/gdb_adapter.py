@@ -61,18 +61,24 @@ class GDBAdapter(HardwareAdapter):
         return name
 
     def connect(self, target_remote: str = "localhost:3333", elf_path: Optional[str] = None) -> bool:
-        cmd = [self.binary_path, "--interpreter=mi2"]
-        if elf_path:
-            cmd.extend([elf_path])
+        # Normalize and Quote all paths for Windows Shell
+        binary = f'"{os.path.normpath(self.binary_path)}"'
+        elf = f'"{os.path.normpath(elf_path)}"' if elf_path else ""
         
+        # Build GDB command for MI mode
+        cmd_str = f'{binary} --interpreter=mi2 {elf}'
+
+        print(f"[GDB] Launching (Shell Mode): {cmd_str}")
         try:
             self.process = subprocess.Popen(
-                cmd,
+                cmd_str,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                bufsize=1
+                shell=True,
+                bufsize=0,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
             )
             
             # Start background reader
