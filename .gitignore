@@ -1,92 +1,30 @@
-# Hardcore.ai - Desktop App
+# VS Code
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/launch.json
 
-## Node/Electron
+# Node.js
 node_modules/
 dist/
-dist-react/
-dist-electron/
-build/
-*.exe
-*.dmg
-*.AppImage
-*.deb
-*.rpm
-*.snap
+out/
+*.vsix
 
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
-.Python
+.venv/
 env/
 venv/
-.venv/
-*.egg-info/
-.eggs/
-*.egg
-
-# IDE
-.idea/
-*.swp
-*.swo
-.vscode/
-*.code-workspace
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs
-*.log
-npm-debug.log*
-
-# Environment
+ENV/
 .env
-.env.local
-.env.*.local
 
-# Test files
-test_*.py
-test_*.js
-*.test.*
+# Extension specific
+extension/dist/
+extension/out/
+extension/backend/.venv/
 
-# Temporary files
-*.tmp
-*.temp
-*.bak
-*~
-
-# Build artifacts
-bundled/python/
-bundled/drivers/
-
-# Database
-*.db
-*.sqlite
-*.sqlite3
-
-# Development scripts (not needed for users)
-add_*.py
-fix_*.py
-implement_*.py
-create_*.py
-debug_*.js
-*_final.py
-
-# Rendered outputs
-*.kicad_sch
-
-# Deployment configs (backend specific)
-netlify.toml
-vercel.json
-render.yaml
-
-# Lock files (users will regenerate)
-# package-lock.json
-
-# Duplicate/old files
-package-simple.json
-README_UPDATED.md
-UI-DEMO.html
-installer.nsi
+# Hardware traces
+auto_fault.json
+*.log

@@ -2,12 +2,12 @@ import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Play, Pause, RotateCcw, Zap, Info } from 'lucide-react';
 import SimulationStage from '../Visualization/SimulationStage';
-import { useAppState } from '../../context/AppStateContext';
+import { useAppStore } from '../../store/useAppStore';
 import { useBoard } from '../../context/BoardContext';
 
 const SimulationTab: React.FC = () => {
-    const { state } = useAppState();
-    const { executionSteps, generatedCode } = state;
+    const executionSteps = useAppStore(state => state.executionSteps);
+    const generatedCode = useAppStore(state => state.generatedCode);
     const { selectedBoard } = useBoard();
     const [isRunning, setIsRunning] = useState(false);
     const [currentStepIndex, setCurrentStepIndex] = useState(0);

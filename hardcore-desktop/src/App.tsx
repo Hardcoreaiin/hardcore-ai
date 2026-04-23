@@ -2,15 +2,14 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import { useBoard } from './context/BoardContext';
 import { useAuth } from './context/AuthContext';
-import { useAppState } from './context/AppStateContext';
+import { useAppStore } from './store/useAppStore';
 import TopBar from './components/TopBar/TopBar';
 import AIAssistant from './components/AIAssistant/AIAssistant';
 import BottomPanel from './components/BottomPanel/BottomPanel';
 import ArchitectureHub from './components/Architecture/ArchitectureHub';
+import LearningHub from './components/LearningHub/LearningHub';
 import LoginScreen from './components/Auth/LoginScreen';
-import MonacoEditor from './components/Editor/MonacoEditor';
-import FileExplorer from './components/Explorer/FileExplorer';
-import { Layout, ShieldAlert, Landmark, ShoppingCart, AlertTriangle, Code } from 'lucide-react';
+import { Layout, Code } from 'lucide-react';
 import { motion } from 'framer-motion';
 
 interface OpenFile {
@@ -21,7 +20,13 @@ interface OpenFile {
 }
 
 function App() {
-    const { state, setGeneratedCode, setActiveTab } = useAppState();
+    // Zustand hook usage (binds specific state/actions to prevent full re-renders)
+    const activeTab = useAppStore(state => state.activeTab);
+    const setActiveTab = useAppStore(state => state.setActiveTab);
+    const generatedFiles = useAppStore(state => state.generatedFiles);
+    const generatedCode = useAppStore(state => state.generatedCode);
+    const setGeneratedCode = useAppStore(state => state.setGeneratedCode);
+
     const { selectedBoard, setSelectedBoard, detectedBoard, connectedPort, setConnectedPort } = useBoard();
     const { isAuthenticated, isLoading: authLoading } = useAuth();
     const [openFiles, setOpenFiles] = useState<OpenFile[]>([]);
@@ -32,12 +37,12 @@ function App() {
 
     // Sync from Global State
     useEffect(() => {
-        if (Object.keys(state.generatedFiles).length > 0) {
+        if (Object.keys(generatedFiles).length > 0) {
             setOpenFiles(prev => {
                 let newFiles = [...prev];
                 let changed = false;
 
-                Object.entries(state.generatedFiles).forEach(([name, content]) => {
+                Object.entries(generatedFiles).forEach(([name, content]) => {
                     const path = name.startsWith('/') ? name : `/src/${name}`;
                     const existing = newFiles.find(f => f.path === path);
 
@@ -56,22 +61,22 @@ function App() {
             });
 
             // Set active file to main.cpp if it was just generated
-            if (state.generatedFiles['main.cpp']) {
+            if (generatedFiles['main.cpp']) {
                 setActiveFilePath('/src/main.cpp');
-            } else if (Object.keys(state.generatedFiles).length > 0 && !activeFilePath) {
-                const firstFile = Object.keys(state.generatedFiles)[0];
+            } else if (Object.keys(generatedFiles).length > 0 && !activeFilePath) {
+                const firstFile = Object.keys(generatedFiles)[0];
                 setActiveFilePath(firstFile.startsWith('/') ? firstFile : `/src/${firstFile}`);
             }
-        } else if (state.generatedCode && !openFiles.find(f => f.content === state.generatedCode)) {
+        } else if (generatedCode && !openFiles.find(f => f.content === generatedCode)) {
             const filePath = '/src/main.cpp';
             setOpenFiles(prev => {
                 const existing = prev.find(f => f.path === filePath);
-                if (existing) return prev.map(f => f.path === filePath ? { ...f, content: state.generatedCode, isDirty: false } : f);
-                return [...prev, { path: filePath, name: 'main.cpp', content: state.generatedCode, isDirty: false }];
+                if (existing) return prev.map(f => f.path === filePath ? { ...f, content: generatedCode, isDirty: false } : f);
+                return [...prev, { path: filePath, name: 'main.cpp', content: generatedCode, isDirty: false }];
             });
             setActiveFilePath(filePath);
         }
-    }, [state.generatedFiles, state.generatedCode]);
+    }, [generatedFiles, generatedCode]);
 
     useEffect(() => {
         const handler = (e: CustomEvent) => setPeripheralCounts(e.detail);
@@ -83,11 +88,11 @@ function App() {
         const name = path.split('/').pop() || 'unknown';
         setOpenFiles(prev => prev.find(f => f.path === path) ? prev : [...prev, { path, name, content, isDirty: false }]);
         setActiveFilePath(path);
-        // If we click a file, we probably want to see the code tab if it wasn't already
-        if (state.activeTab !== 'code') {
-            setActiveTab('code');
+        // If we click a file, we probably want to see the firmware tab if it wasn't already
+        if (activeTab !== 'firmware') {
+            setActiveTab('firmware');
         }
-    }, [state.activeTab, setActiveTab]);
+    }, [activeTab, setActiveTab]);
 
     const handleEditorChange = useCallback((value: string | undefined) => {
         if (!value || !activeFilePath) return;
@@ -116,12 +121,8 @@ function App() {
     }, []);
 
     const tabs = [
-        { id: 'architecture', label: 'Overview', icon: <Layout className="w-4 h-4" /> },
-        { id: 'security', label: 'Security', icon: <ShieldAlert className="w-4 h-4" /> },
-        { id: 'compliance', label: 'Compliance', icon: <Landmark className="w-4 h-4" /> },
-        { id: 'bom', label: 'BOM', icon: <ShoppingCart className="w-4 h-4" /> },
-        { id: 'risk', label: 'Risk Analysis', icon: <AlertTriangle className="w-4 h-4" /> },
-        { id: 'code', label: 'Firmware', icon: <Code className="w-4 h-4" /> },
+        { id: 'architecture' as const, label: 'Architecture', icon: <Layout className="w-4 h-4" /> },
+        { id: 'firmware' as const, label: 'Firmware', icon: <Code className="w-4 h-4" /> },
     ];
 
     if (authLoading) return <div className="h-screen w-screen flex items-center justify-center bg-black text-neutral-600">Loading...</div>;
@@ -155,15 +156,15 @@ function App() {
                                     {tabs.map(t => (
                                         <button
                                             key={t.id}
-                                            onClick={() => setActiveTab(t.id)}
-                                            className={`group relative flex items-center gap-2 px-5 py-4 transition-all whitespace-nowrap ${state.activeTab === t.id ? 'text-white' : 'text-neutral-500 hover:text-neutral-300'
+                                            onClick={() => setActiveTab(t.id as any)}
+                                            className={`group relative flex items-center gap-2 px-5 py-4 transition-all whitespace-nowrap ${activeTab === t.id ? 'text-white' : 'text-neutral-500 hover:text-neutral-300'
                                                 }`}
                                         >
-                                            <div className={`p-1.5 rounded-lg transition-all ${state.activeTab === t.id ? 'bg-white/10 text-blue-400 shadow-[0_0_15px_rgba(96,165,250,0.1)]' : 'bg-transparent'}`}>
+                                            <div className={`p-1.5 rounded-lg transition-all ${activeTab === t.id ? 'bg-white/10 text-blue-400 shadow-[0_0_15px_rgba(96,165,250,0.1)]' : 'bg-transparent'}`}>
                                                 {t.icon}
                                             </div>
                                             <span className="text-[11px] font-black uppercase tracking-[0.15em]">{t.label}</span>
-                                            {state.activeTab === t.id && (
+                                            {activeTab === t.id && (
                                                 <motion.div
                                                     layoutId="hubActiveTab"
                                                     className="absolute bottom-0 left-0 right-0 h-0.5 bg-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.5)]"
@@ -174,44 +175,8 @@ function App() {
                                 </div>
 
                                 <div className="flex-1 min-h-0">
-                                    {state.activeTab === 'code' ? (
-                                        <PanelGroup direction="horizontal">
-                                            {/* File Explorer Sidebar */}
-                                            <Panel defaultSize={20} minSize={10} maxSize={30}>
-                                                <FileExplorer
-                                                    files={openFiles}
-                                                    onFileClick={handleFileClick}
-                                                    activePath={activeFilePath}
-                                                />
-                                            </Panel>
-
-                                            <PanelResizeHandle className="w-1 bg-transparent hover:bg-blue-600/20 transition-colors" />
-
-                                            {/* Main Content Area: Editor */}
-                                            <Panel defaultSize={80} className="flex flex-col">
-                                                <div className="flex bg-neutral-900 border-b border-white/5 overflow-x-auto scrollbar-hide">
-                                                    {openFiles.map(f => (
-                                                        <div
-                                                            key={f.path}
-                                                            onClick={() => setActiveFilePath(f.path)}
-                                                            className={`px-4 py-2 text-[10px] font-black uppercase tracking-widest cursor-pointer border-r border-white/5 transition-all whitespace-nowrap ${activeFilePath === f.path
-                                                                ? 'bg-blue-600/10 text-blue-400 border-b-2 border-blue-500'
-                                                                : 'text-neutral-500 hover:bg-white/5'
-                                                                }`}
-                                                        >
-                                                            {f.name}
-                                                        </div>
-                                                    ))}
-                                                </div>
-                                                <div className="flex-1">
-                                                    <MonacoEditor
-                                                        value={activeFile?.content || ''}
-                                                        onChange={handleEditorChange}
-                                                        language={activeFilePath?.endsWith('.md') ? 'markdown' : (activeFilePath?.endsWith('.h') ? 'cpp' : 'cpp')}
-                                                    />
-                                                </div>
-                                            </Panel>
-                                        </PanelGroup>
+                                    {activeTab === 'firmware' ? (
+                                        <LearningHub />
                                     ) : (
                                         <ArchitectureHub />
                                     )}

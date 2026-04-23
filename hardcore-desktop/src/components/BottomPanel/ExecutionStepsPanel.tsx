@@ -1,10 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { Play, Pause, RotateCcw, CheckCircle, Circle } from 'lucide-react';
-import { useAppState } from '../../context/AppStateContext';
+import { useAppStore } from '../../store/useAppStore';
 
 const ExecutionStepsPanel: React.FC = () => {
-    const { state } = useAppState();
-    const { executionSteps } = state;
+    const executionSteps = useAppStore(state => state.executionSteps);
     const [isPlaying, setIsPlaying] = useState(false);
     const [currentStep, setCurrentStep] = useState(0);
 

@@ -1,11 +1,10 @@
 import React, { useState, useCallback, useRef } from 'react';
 import { motion } from 'framer-motion';
 import { Lightbulb, Zap, Code, Play, Globe, ZoomIn, ZoomOut, Maximize2, BookOpen } from 'lucide-react';
-import { useAppState } from '../../context/AppStateContext';
+import { useAppStore } from '../../store/useAppStore';
 
 const TheoryTab: React.FC = () => {
-    const { state } = useAppState();
-    const { theory } = state;
+    const theory = useAppStore(state => state.theory);
     const [zoom, setZoom] = useState(1);
     const containerRef = useRef<HTMLDivElement>(null);
 

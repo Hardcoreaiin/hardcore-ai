@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { Loader2, AlertTriangle, Cpu, ZoomIn, ZoomOut, Maximize2 } from 'lucide-react';
-import { useAppState, PinInfo } from '../../context/AppStateContext';
+import { useAppStore, PinInfo } from '../../store/useAppStore';
 
 // ─── ESP32 DevKit Pin Layout (physical board) ──────────────────────────
 const LEFT_PINS = [
@@ -39,7 +39,6 @@ const RIGHT_PINS = [
     { gpio: 'GND2', label: 'GND' },
 ];
 
-// ─── Colors ────────────────────────────────────────────────────────────
 const MODE_COLORS: Record<string, string> = {
     OUTPUT: '#22c55e', PWM_OUTPUT: '#f59e0b', INPUT: '#3b82f6',
     INPUT_PULLUP: '#60a5fa', INPUT_PULLDOWN: '#93c5fd', ANALOG_INPUT: '#a78bfa',
@@ -66,13 +65,13 @@ const COMPONENT_ICONS: Record<string, string> = {
     'SPI Bus (CLK)': '🔗', 'SPI Bus (MOSI)': '🔗', 'SPI Bus (MISO)': '🔗', 'SPI Bus (SS)': '🔗',
 };
 
-// ─── SVG dimensions ────────────────────────────────────────────────────
 const BOARD_W = 160, BOARD_H = 480, BOARD_X = 320, BOARD_Y = 30;
 const PIN_GAP = 30, PIN_LEN = 20, SVG_W = 900, SVG_H = BOARD_Y * 2 + BOARD_H + 20;
 
 const PinDiagramTab: React.FC = () => {
-    const { state, setPinAnalysis } = useAppState();
-    const { pinAnalysis, generatedCode } = state;
+    const pinAnalysis = useAppStore(state => state.pinAnalysis);
+    const setPinAnalysis = useAppStore(state => state.setPinAnalysis);
+    const generatedCode = useAppStore(state => state.generatedCode);
     const [analyzing, setAnalyzing] = useState(false);
     const [hoveredGpio, setHoveredGpio] = useState<number | string | null>(null);
     const [zoom, setZoom] = useState(1);

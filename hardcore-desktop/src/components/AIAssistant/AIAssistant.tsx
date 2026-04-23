@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Send, Loader2, Sparkles, Zap } from 'lucide-react';
-import { useAppState } from '../../context/AppStateContext';
+import { useAppStore } from '../../store/useAppStore';
 import { useBoard } from '../../context/BoardContext';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -13,12 +13,11 @@ const API_HEADERS = {
 interface Message { id: string; role: 'user' | 'assistant'; content: string; type?: 'text' | 'teaching' | 'code'; }
 
 const AIAssistant: React.FC = () => {
-    const { state } = useAppState();
     const { selectedBoard, detectedBoard } = useBoard();
     const [messages, setMessages] = useState<Message[]>([{
         id: '1',
         role: 'assistant',
-        content: 'System ready. Describe your industrial hardware requirements (e.g., "i.MX93 dual-core MPU with 8GB LPDDR4 and secure boot").'
+        content: 'System ready. Describe an embedded system to generate architecture and firmware (e.g., "Build a secure i.MX93 dual-core system with WiFi 6 and OTA updates").'
     }]);
     const [input, setInput] = useState('');
     const [loading, setLoading] = useState(false);
@@ -28,15 +27,19 @@ const AIAssistant: React.FC = () => {
     const statusIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
     // Use global state
-    const {
-        setGeneratedCode,
-        setGeneratedFiles,
-        setComponents,
-        setConnections,
-        setPinJson,
-        setArchitectureReport,
-        setActiveTab,
-    } = useAppState();
+    const setGeneratedCode = useAppStore(state => state.setGeneratedCode);
+    const setGeneratedFiles = useAppStore(state => state.setGeneratedFiles);
+    const setComponents = useAppStore(state => state.setComponents);
+    const setConnections = useAppStore(state => state.setConnections);
+    const setPinJson = useAppStore(state => state.setPinJson);
+    const setArchitectureReport = useAppStore(state => state.setArchitectureReport);
+    const setActiveTab = useAppStore(state => state.setActiveTab);
+    const setMode = useAppStore(state => state.setMode);
+    
+    // Multi-stage pipeline state
+    const pipelineStep = useAppStore(state => state.pipelineStep);
+    const setPipelineStep = useAppStore(state => state.setPipelineStep);
+    const setInternalSpec = useAppStore(state => state.setInternalSpec);
 
     useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
 
@@ -51,7 +54,7 @@ const AIAssistant: React.FC = () => {
 
         statusIntervalRef.current = setInterval(async () => {
             try {
-                const sRes = await fetch('http://localhost:8003/chat/status', { headers: API_HEADERS });
+                const sRes = await fetch('http://localhost:8000/chat/status', { headers: API_HEADERS });
                 if (sRes.ok) {
                     const sData = await sRes.json();
                     if (sData.message) setLoadingMessage(sData.message);
@@ -62,7 +65,7 @@ const AIAssistant: React.FC = () => {
         }, 1500);
 
         try {
-            const res = await fetch('http://localhost:8003/chat', {
+            const res = await fetch('http://localhost:8000/chat', {
                 method: 'POST',
                 headers: API_HEADERS,
                 body: JSON.stringify({
@@ -70,46 +73,53 @@ const AIAssistant: React.FC = () => {
                     history: messages.map(m => ({ role: m.role, content: m.content })),
                     board_type: selectedBoard || 'esp32dev',
                     detected_board: detectedBoard || null,
+                    pipeline_step: pipelineStep
                 }),
             });
             const data = await res.json();
 
-            if (data.response_type === 'architecture') {
-                if (data.report) {
-                    setArchitectureReport(data.report);
+            if (data.response_type === 'architecture' || data.response_type === 'code') {
+                const report = data.report;
+                if (report) {
+                    setArchitectureReport(report);
+                    if (report.mode) setMode(report.mode);
+                    if (report.internal_spec) setInternalSpec(report.internal_spec);
+                    
+                    // Logic to increment pipeline step based on AI output
+                    if (report.pipeline_step) {
+                        if (report.pipeline_step === 'ARCHITECTURE') setPipelineStep('BOM');
+                        else if (report.pipeline_step === 'BOM') setPipelineStep('FIRMWARE');
+                        else if (report.pipeline_step === 'FIRMWARE') setPipelineStep('TWIN');
+                    }
                 }
 
                 setMessages(prev => [...prev, {
                     id: `a${Date.now()}`,
                     role: 'assistant',
-                    content: '✅ Industrial architecture specification generated. Please review the tabs for details on security, compliance, and BOM.'
+                    content: data.message || '✅ Engineering stage completed.'
                 }]);
 
-                setActiveTab('architecture');
-            } else if (data.response_type === 'code') {
-                if (data.firmware) setGeneratedCode(data.firmware);
-                if (data.files) setGeneratedFiles(data.files);
-                if (data.report) setArchitectureReport(data.report);
-
-                setMessages(prev => [...prev, {
-                    id: `a${Date.now()}`,
-                    role: 'assistant',
-                    content: '✅ Industrial firmware and architecture specification generated. Both the code editor and architecture tabs have been updated.'
-                }]);
-
-                setActiveTab('code');
+                if (data.response_type === 'code') {
+                    if (data.firmware) setGeneratedCode(data.firmware);
+                    if (data.files) setGeneratedFiles(data.files);
+                    setActiveTab('firmware');
+                } else {
+                    setActiveTab('architecture');
+                }
             } else {
                 setMessages(prev => [...prev, {
                     id: `a${Date.now()}`,
                     role: 'assistant',
-                    content: data.message || 'I am ready to assist with your architecture design.'
+                    content: data.message || (data.questions ? data.questions.join('\n\n') : 'Understood. Proceeding...')
                 }]);
+                
+                if (pipelineStep === 'INTENT') setPipelineStep('CLARIFICATION');
             }
         } catch (e) {
             setMessages(prev => [...prev, {
                 id: `a${Date.now()}`,
                 role: 'assistant',
-                content: 'Failed to connect to backend. Make sure the server is running.'
+                content: 'Failed to connect to backend. Make sure the server is running on port 8000.'
             }]);
         } finally {
             setLoading(false);

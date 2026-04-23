@@ -1,0 +1,6 @@
+httpx
+python-dotenv
+pyelftools
+pyserial
+intelhex
+typing-extensions

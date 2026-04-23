@@ -2,7 +2,7 @@ import React, { useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { useBoard } from '../../context/BoardContext';
 import { useAuth } from '../../context/AuthContext';
-import { useAppState } from '../../context/AppStateContext';
+import { useAppStore } from '../../store/useAppStore';
 import { Cpu, Wifi, Zap, ChevronDown, LogOut, Loader2, Settings, GraduationCap, Trophy } from 'lucide-react';
 import SettingsModal from '../Settings/SettingsModal';
 
@@ -28,7 +28,7 @@ const boards = [
 
 const TopBar: React.FC<TopBarProps> = ({ onPortChange, onBoardChange, currentCode }) => {
     const { selectedBoard, setSelectedBoard, connectedPort, setConnectedPort } = useBoard();
-    const { setActiveTab } = useAppState();
+    const setActiveTab = useAppStore(state => state.setActiveTab);
     const { user, logout } = useAuth();
     const [showProfile, setShowProfile] = useState(false);
     const [showBoards, setShowBoards] = useState(false);

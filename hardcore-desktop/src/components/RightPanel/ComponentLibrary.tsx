@@ -1,11 +1,10 @@
 import React from 'react';
-import { useAppState } from '../../context/AppStateContext';
+import { useAppStore } from '../../store/useAppStore';
 import { Lightbulb, Gauge, Thermometer, Waves, ToggleLeft, Cpu, Zap, Info, Package } from 'lucide-react';
 import { motion } from 'framer-motion';
 
 const ComponentLibrary: React.FC = () => {
-    const { state } = useAppState();
-    const { components } = state;
+    const components = useAppStore(state => state.components);
 
     // Icon mapping for component types
     const getComponentIcon = (type: string) => {

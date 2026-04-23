@@ -3,7 +3,6 @@ import { Terminal, Activity, Layers } from 'lucide-react';
 import { motion } from 'framer-motion';
 import SerialMonitor from './SerialMonitor';
 import BuildOutput from './BuildOutput';
-import { useAppState } from '../../context/AppStateContext';
 
 // Desktop bypass header for local authentication
 const API_HEADERS = {

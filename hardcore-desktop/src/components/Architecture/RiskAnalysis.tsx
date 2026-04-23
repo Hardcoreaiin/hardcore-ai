@@ -1,16 +1,15 @@
 import React from 'react';
-import { useAppState } from '../../context/AppStateContext';
+import { useAppStore } from '../../store/useAppStore';
 import { AlertTriangle, TrendingDown, Target, Zap } from 'lucide-react';
 
 const RiskAnalysis: React.FC = () => {
-    const { state } = useAppState();
-    const { architectureReport } = state;
+    const architectureReport = useAppStore(state => state.architectureReport);
 
     if (!architectureReport) return null;
 
     return (
-        <div className="p-8 space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700 font-sans">
-            <div className="flex items-center gap-4 border-b border-white/5 pb-6">
+        <div className="p-4 space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700 font-sans">
+            <div className="flex items-center gap-4 border-b border-white/5 pb-4">
                 <div className="w-12 h-12 rounded-xl bg-red-500/10 flex items-center justify-center border border-red-500/20">
                     <AlertTriangle className="w-6 h-6 text-red-400" />
                 </div>
@@ -58,9 +57,24 @@ const RiskAnalysis: React.FC = () => {
                     <AlertTriangle className="w-5 h-5 text-red-400" />
                     <h3 className="text-sm font-black text-white uppercase tracking-wider">Risk Mitigation Strategy</h3>
                 </div>
-                <pre className="text-sm text-neutral-300 whitespace-pre-wrap font-medium leading-relaxed italic">
-                    {architectureReport.risks}
-                </pre>
+                <div className="space-y-4">
+                    {architectureReport.risk_analysis?.map((risk: any, idx: number) => (
+                        <div key={idx} className="p-4 bg-white/5 rounded-xl border border-white/5">
+                            <div className="flex items-center gap-3 mb-2">
+                                <span className="font-bold text-white">{risk.category} Risk</span>
+                                <span className="px-2 py-0.5 rounded bg-red-500/20 text-[10px] font-black text-red-400 uppercase tracking-widest">
+                                    Severity {risk.severity}/10
+                                </span>
+                            </div>
+                            <p className="text-sm text-neutral-300 leading-relaxed italic">
+                                {risk.description}
+                            </p>
+                        </div>
+                    ))}
+                    {(!architectureReport.risk_analysis || architectureReport.risk_analysis.length === 0) && (
+                        <div className="text-sm text-neutral-500 italic">No specific risks highlighted.</div>
+                    )}
+                </div>
             </div>
         </div>
     );

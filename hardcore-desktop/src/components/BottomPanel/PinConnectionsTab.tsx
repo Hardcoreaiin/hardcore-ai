@@ -1,5 +1,5 @@
 import React from 'react';
-import { useAppState } from '../../context/AppStateContext';
+import { useAppStore } from '../../store/useAppStore';
 import ESP32Board from '../Visualization/ESP32Board';
 import { Zap, Info } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -9,8 +9,8 @@ interface PinConnectionsTabProps {
 }
 
 const PinConnectionsTab: React.FC<PinConnectionsTabProps> = ({ selectedBoard }) => {
-    const { state } = useAppState();
-    const { components, connections } = state;
+    const components = useAppStore(state => state.components);
+    const connections = useAppStore(state => state.connections);
     const [simulatedPinStates, setSimulatedPinStates] = React.useState<Record<number, 'HIGH' | 'LOW'>>({});
 
     // Parse active pins

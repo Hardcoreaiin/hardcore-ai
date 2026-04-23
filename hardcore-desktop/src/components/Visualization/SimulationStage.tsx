@@ -1,23 +1,10 @@
 import React, { useMemo, useState, useEffect, useRef, useCallback } from 'react';
-import { useAppState } from '../../context/AppStateContext';
+import { useAppStore } from '../../store/useAppStore';
 
 // Import Wokwi Elements (ensure they are registered)
 import '@wokwi/elements';
 
-// Define custom elements for TypeScript
-declare global {
-    namespace JSX {
-        interface IntrinsicElements {
-            'wokwi-esp32-devkit-v1': React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement>, HTMLElement>;
-            'wokwi-led': React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement>, HTMLElement> & { color?: string; value?: boolean; label?: string };
-            'wokwi-resistor': React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement>, HTMLElement> & { value?: string };
-            'wokwi-pushbutton': React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement>, HTMLElement> & { color?: string };
-            'wokwi-potentiometer': React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement>, HTMLElement>;
-            'wokwi-sevseg': React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement>, HTMLElement>;
-            'wokwi-lcd1602': React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement>, HTMLElement>;
-        }
-    }
-}
+// Wokwi elements typings are provided by @wokwi/elements - no need to re-declare.
 
 interface SimulationStageProps {
     isRunning: boolean;
@@ -25,8 +12,9 @@ interface SimulationStageProps {
 }
 
 const SimulationStage: React.FC<SimulationStageProps> = ({ isRunning, onReset }) => {
-    const { state } = useAppState();
-    const { diagram, executionSteps, simulationLogic } = state;
+    const diagram = useAppStore(state => state.diagram);
+    const executionSteps = useAppStore(state => state.executionSteps);
+    const simulationLogic = useAppStore(state => state.simulationLogic);
 
     // Simulation State
     const [simTime, setSimTime] = useState(0);
@@ -216,13 +204,14 @@ const SimulationStage: React.FC<SimulationStageProps> = ({ isRunning, onReset })
                     {/* Parts */}
                     {diagram.parts?.map((part: any, i: number) => {
                         const { type, id, top, left, attrs } = part;
-                        const style = { position: 'absolute' as 'absolute', top: `${top}px`, left: `${left}px` };
+                        const style: React.CSSProperties = { position: 'absolute', top: `${top}px`, left: `${left}px` };
 
                         // Find connected PIN for this part to set attributes
                         const pin = parseInt(Object.keys(pinMap).find(p => pinMap[parseInt(p)] === id) || '-1');
                         const pinVal = pin !== -1 ? (pinStates[pin] || 0) : 0;
 
                         if (type === 'wokwi-esp32-devkit-v1') {
+                            // @ts-ignore
                             return <wokwi-esp32-devkit-v1 key={id} style={style} />;
                         }
                         if (type === 'wokwi-led') {
@@ -233,7 +222,7 @@ const SimulationStage: React.FC<SimulationStageProps> = ({ isRunning, onReset })
                             // Find which pin this button drives (logic is reversed for input: button drives logic)
                             // But here we need to capture events
                             return (
-                                <div key={id} style={style}
+                                <div key={id} style={{ position: 'absolute', top: `${top}px`, left: `${left}px` } as React.CSSProperties}
                                     onMouseDown={() => handleInput(pin, 1)}
                                     // Use window mouse up to catch release outside element
                                     onMouseUp={() => handleInput(pin, 0)}
@@ -243,6 +232,7 @@ const SimulationStage: React.FC<SimulationStageProps> = ({ isRunning, onReset })
                             );
                         }
                         if (type === 'wokwi-resistor') {
+                            // @ts-ignore
                             return <wokwi-resistor key={id} style={style} value={attrs.value} />;
                         }
                         return null;

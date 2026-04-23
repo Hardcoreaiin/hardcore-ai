@@ -1,16 +1,15 @@
 import React from 'react';
-import { useAppState } from '../../context/AppStateContext';
+import { useAppStore } from '../../store/useAppStore';
 import { Landmark, CheckCircle2, ShieldCheck, Globe } from 'lucide-react';
 
 const ComplianceReport: React.FC = () => {
-    const { state } = useAppState();
-    const { architectureReport } = state;
+    const architectureReport = useAppStore(state => state.architectureReport);
 
     if (!architectureReport) return null;
 
     return (
-        <div className="p-8 space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700">
-            <div className="flex items-center gap-4 border-b border-white/5 pb-6">
+        <div className="p-4 space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700">
+            <div className="flex items-center gap-4 border-b border-white/5 pb-4">
                 <div className="w-12 h-12 rounded-xl bg-emerald-500/10 flex items-center justify-center border border-emerald-500/20">
                     <Landmark className="w-6 h-6 text-emerald-400" />
                 </div>
@@ -41,9 +40,9 @@ const ComplianceReport: React.FC = () => {
                             <ShieldCheck className="w-5 h-5 text-emerald-400" />
                             <h3 className="text-sm font-black text-white uppercase tracking-wider">Wireless Modules</h3>
                         </div>
-                        <pre className="text-sm text-neutral-400 whitespace-pre-wrap font-sans font-medium italic">
-                            {architectureReport.wireless}
-                        </pre>
+                        <p className="text-sm text-neutral-400 font-sans font-medium italic">
+                            Hardware interfaces: {architectureReport.interfaces?.filter((i: any) => i.component.toLowerCase().includes('wifi') || i.component.toLowerCase().includes('bluetooth') || i.component.toLowerCase().includes('radio') || i.component.toLowerCase().includes('wireless')).map((i: any) => `${i.component} (${i.bus})`).join(', ') || 'None specified.'}
+                        </p>
                     </div>
                 </div>
 
@@ -53,9 +52,14 @@ const ComplianceReport: React.FC = () => {
                         <h3 className="text-sm font-black text-white uppercase tracking-wider">Compliance Checklist</h3>
                     </div>
                     <div className="flex-1 overflow-y-auto">
-                        <pre className="text-sm text-neutral-300 whitespace-pre-wrap font-sans leading-relaxed">
-                            {architectureReport.compliance}
-                        </pre>
+                        <ul className="text-sm text-neutral-300 font-sans leading-relaxed space-y-3">
+                            {architectureReport.compliance?.map((comp, idx) => (
+                                <li key={idx} className="flex gap-3">
+                                    <span className="font-bold text-emerald-400 whitespace-nowrap">{comp.standard}:</span>
+                                    <span>{comp.description}</span>
+                                </li>
+                            ))}
+                        </ul>
                     </div>
                 </div>
             </div>

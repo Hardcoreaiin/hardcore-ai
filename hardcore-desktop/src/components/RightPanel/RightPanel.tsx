@@ -7,7 +7,7 @@ import DatasheetUpload from '../BottomPanel/DatasheetUpload';
 import LearningExplanationPanel from './LearningExplanationPanel';
 import ComponentLibrary from './ComponentLibrary';
 import LessonMode from '../Lessons/LessonMode';
-import { useAppState } from '../../context/AppStateContext';
+import { useAppStore } from '../../store/useAppStore';
 
 import { PanelGroup, Panel, PanelResizeHandle } from 'react-resizable-panels';
 
@@ -20,8 +20,7 @@ type Tab = 'visual' | 'peripherals' | 'docs' | 'components' | 'lessons';
 
 const RightPanel: React.FC<RightPanelProps> = ({ selectedBoard, learningMode = true }) => {
     const [tab, setTab] = useState<Tab>('visual');
-    const { state } = useAppState();
-    const { learningData } = state;
+    const learningData = useAppStore(state => state.learningData);
 
     const tabs: { id: Tab; label: string; icon: React.ReactNode }[] = [
         { id: 'visual', label: 'Visual', icon: <Network className="w-4 h-4" /> },

@@ -1,9 +1,8 @@
 import { BookOpen, Lightbulb, Cpu, Code, ShieldAlert, GraduationCap, Microscope, HelpCircle, Zap } from 'lucide-react';
-import { useAppState } from '../../context/AppStateContext';
+import { useAppStore } from '../../store/useAppStore';
 
 const LearningExplanationPanel: React.FC = () => {
-    const { state } = useAppState();
-    const { learningData } = state;
+    const learningData = useAppStore(state => state.learningData);
 
     // Handle both object and string formats
     const content = typeof learningData === 'string'

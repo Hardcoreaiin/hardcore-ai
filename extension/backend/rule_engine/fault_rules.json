@@ -1,0 +1,34 @@
+{
+    "CFSR": {
+        "MMFSR": {
+            "IACCVIOL": [1, "Instruction access violation: The processor attempted an instruction fetch from a location that does not permit execution."],
+            "DACCVIOL": [2, "Data access violation: The processor attempted a load or store at a location that does not permit the operation."],
+            "MUNSTKERR": [8, "MemManage fault on unstacking for a return from exception."],
+            "MSTKERR": [16, "MemManage fault on stacking for exception entry."],
+            "MLSPERR": [32, "MemManage fault occurred during floating-point lazy state preservation."],
+            "MMARVALID": [128, "MMFAR holds a valid fault address."]
+        },
+        "BFSR": {
+            "IBUSERR": [256, "Instruction bus error: The processor attempted an instruction fetch from a location that does not permit execution."],
+            "PRECISERR": [512, "Precise data bus error: A data bus error occurred, and the PC value stacked for the exception entry points to the instruction that caused the fault."],
+            "IMPRECISERR": [1024, "Imprecise data bus error: A data bus error occurred, but the return address in the stack frame is not related to the instruction that caused the error."],
+            "UNSTKERR": [2048, "BusFault on unstacking for a return from exception."],
+            "STKERR": [4096, "BusFault on stacking for exception entry."],
+            "LSPERR": [8192, "BusFault occurred during floating-point lazy state preservation."],
+            "BFARVALID": [32768, "BFAR holds a valid fault address."]
+        },
+        "UFSR": {
+            "UNDEFINSTR": [65536, "Undefined instruction: The processor attempted to execute an undefined instruction."],
+            "INVSTATE": [131072, "Invalid state: The processor attempted to execute an instruction that makes illegal use of the EPSR."],
+            "INVPC": [262144, "Invalid PC load: A branch or load to a PC with an invalid value occurred."],
+            "NOCP": [524288, "No coprocessor: The processor attempted to access a coprocessor it does not support."],
+            "UNALIGNED": [16777216, "Unaligned access: The processor made an unaligned memory access."],
+            "DIVBYZERO": [33554432, "Divide by zero: The processor executed an SDIV or UDIV instruction with a divisor of 0."]
+        }
+    },
+    "HFSR": {
+        "VECTBL": [2, "BusFault on a vector table read during exception processing."],
+        "FORCED": [1073741824, "Forced HardFault: A fault with configurable priority has been escalated to a HardFault."],
+        "DEBUGEVT": [2147483648, "Debug event: A debug event has occurred."]
+    }
+}

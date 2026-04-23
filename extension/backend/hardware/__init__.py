@@ -1,0 +1,1 @@
+# HARDCOREAI Hardware Abstraction Layer

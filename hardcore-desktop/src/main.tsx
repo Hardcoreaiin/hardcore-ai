@@ -5,7 +5,6 @@ import './index.css';
 import { ErrorBoundary } from 'react-error-boundary';
 import { BoardProvider } from './context/BoardContext';
 import { AuthProvider } from './context/AuthContext';
-import { AppStateProvider } from './context/AppStateContext';
 
 function ErrorFallback({ error }: { error: Error }) {
     return (
@@ -31,9 +30,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         <ErrorBoundary FallbackComponent={ErrorFallback}>
             <AuthProvider>
                 <BoardProvider>
-                    <AppStateProvider>
-                        <App />
-                    </AppStateProvider>
+                    <App />
                 </BoardProvider>
             </AuthProvider>
         </ErrorBoundary>

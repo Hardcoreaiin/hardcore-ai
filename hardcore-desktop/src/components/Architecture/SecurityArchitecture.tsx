@@ -1,16 +1,15 @@
 import React from 'react';
-import { useAppState } from '../../context/AppStateContext';
+import { useAppStore } from '../../store/useAppStore';
 import { ShieldAlert, Key, FileLock2, RefreshCw } from 'lucide-react';
 
 const SecurityArchitecture: React.FC = () => {
-    const { state } = useAppState();
-    const { architectureReport } = state;
+    const architectureReport = useAppStore(state => state.architectureReport);
 
     if (!architectureReport) return null;
 
     return (
-        <div className="p-8 space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700">
-            <div className="flex items-center gap-4 border-b border-white/5 pb-6">
+        <div className="p-4 space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700">
+            <div className="flex items-center gap-4 border-b border-white/5 pb-4">
                 <div className="w-12 h-12 rounded-xl bg-orange-500/10 flex items-center justify-center border border-orange-500/20">
                     <ShieldAlert className="w-6 h-6 text-orange-400" />
                 </div>
@@ -55,9 +54,25 @@ const SecurityArchitecture: React.FC = () => {
                     <h3 className="text-xs font-black text-orange-400 uppercase tracking-[0.2em]">Security Implementation Plan</h3>
                 </div>
                 <div className="p-6">
-                    <pre className="text-sm text-neutral-300 whitespace-pre-wrap font-sans leading-relaxed">
-                        {architectureReport.security}
-                    </pre>
+                    <div className="text-sm text-neutral-300 font-sans leading-relaxed space-y-4">
+                        <div className="flex items-center gap-2">
+                            <span className="font-bold text-orange-400">Secure Enclave:</span> {architectureReport.security?.secure_enclave || 'N/A'}
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <span className="font-bold text-orange-400">Cryptography:</span> {architectureReport.security?.cryptography || 'N/A'}
+                        </div>
+                        {architectureReport.security?.features && (
+                            <div>
+                                <span className="font-bold text-orange-400 block mb-1">Features:</span>
+                                <ul className="list-disc list-inside ml-2">
+                                    {architectureReport.security.features.map((f, i) => <li key={i}>{f}</li>)}
+                                </ul>
+                            </div>
+                        )}
+                        <p className="border-t border-white/5 pt-4 mt-4 italic">
+                            {architectureReport.security?.explanation}
+                        </p>
+                    </div>
                 </div>
             </div>
 
@@ -66,9 +81,35 @@ const SecurityArchitecture: React.FC = () => {
                     <h3 className="text-xs font-black text-orange-400 uppercase tracking-[0.2em]">Firmware Pipeline & OTA</h3>
                 </div>
                 <div className="p-6">
-                    <pre className="text-sm text-neutral-300 whitespace-pre-wrap font-sans leading-relaxed">
-                        {architectureReport.firmware_pipeline}
-                    </pre>
+                    <div className="text-sm text-neutral-300 font-sans leading-relaxed space-y-4">
+                        <div className="grid grid-cols-2 gap-4">
+                            <div>
+                                <span className="font-bold text-orange-400 block">OS/RTOS:</span> 
+                                {architectureReport.firmware_stack?.os || 'N/A'}
+                            </div>
+                            <div>
+                                <span className="font-bold text-orange-400 block">Bootloader:</span> 
+                                {architectureReport.firmware_stack?.bootloader || 'N/A'}
+                            </div>
+                            <div>
+                                <span className="font-bold text-orange-400 block">OTA Mechanism:</span> 
+                                {architectureReport.firmware_stack?.ota || 'N/A'}
+                            </div>
+                        </div>
+                        {architectureReport.firmware_stack?.drivers && (
+                            <div>
+                                <span className="font-bold text-orange-400 block mb-1">Required Drivers:</span>
+                                <div className="flex flex-wrap gap-2">
+                                    {architectureReport.firmware_stack.drivers.map((d, i) => (
+                                        <span key={i} className="px-2 py-1 bg-white/5 rounded text-xs">{d}</span>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                        <p className="border-t border-white/5 pt-4 mt-4 italic">
+                            {architectureReport.firmware_stack?.explanation}
+                        </p>
+                    </div>
                 </div>
             </div>
         </div>
