@@ -1,144 +1,71 @@
-# 🔥 Hardcore.ai - AI-Powered Hardware IDE
+# 🔥 HARDCOREAI - The AI-Powered Hardware Diagnostic IDE
 
-> **"Cursor for Hardware"** - The first AI-powered IDE that lets you describe hardware behavior in plain English and generates ready-to-flash firmware.
+> **"Cursor for Embedded Engineers"** - A production-grade VS Code extension that automatically detects hardware faults, decodes stack traces, and provides AI-powered fixes for STM32 and other Cortex-M systems.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
-![Node](https://img.shields.io/badge/node-18+-green)
-![Python](https://img.shields.io/badge/python-3.10+-yellow)
+![Extension](https://img.shields.io/badge/VS_Code-Extension-brightgreen)
 
-## ✨ Features
+---
 
-- 🤖 **AI Code Generation** - Describe what you want in plain English, get working firmware
-- ⚡ **One-Click Flash** - Build and flash directly from the IDE
-- 🔌 **Auto-Detect Boards** - Automatic USB device detection (ESP32, Arduino, STM32)
-- 📊 **Visual Pin Diagrams** - Interactive board visualizations with pin highlighting
-- 📡 **Serial Monitor** - Real-time serial communication
-- 🎨 **Modern Dark UI** - Beautiful, professional interface
+## ✨ Key Features
 
-## 🚀 Quick Start
+- 🧠 **Zero-Touch Setup** - Self-contained Python backend with automated virtual environment management.
+- 📡 **Live Hardware Monitor** - Real-time connection to ST-Link/J-Link via OpenOCD/GDB.
+- 💥 **Automated Fault Decoding** - Instant capture and analysis of HardFault, MemManage, and UsageFault exceptions.
+- 🤖 **Expert AI Reasoning** - Integrated Gemini AI that understands register states and provides source-level fix suggestions.
+- 📊 **Dynamic Dashboard** - Beautiful, integrated VS Code panel for visualizing fault state and memory.
+- 🔍 **Tool Discovery** - Smart auto-discovery of OpenOCD and GDB binaries (STM32CubeIDE compatible).
 
-### Prerequisites
+---
 
-- **Node.js** 18+ ([Download](https://nodejs.org/))
-- **Python** 3.10+ ([Download](https://python.org/))
-- **PlatformIO Core** ([Install Guide](https://docs.platformio.org/en/latest/core/installation.html))
+## 🚀 Installation
 
-### Installation
+HARDCOREAI is distributed as a single `.vsix` package for ease of use.
 
-```bash
-# Clone the repository
-git clone https://github.com/YOUR_USERNAME/hardcoreai.git
-cd hardcoreai
+1. **Download** the latest `hardcore-ai-0.1.0.vsix` from the [Releases](https://github.com/Hardcoreaiin/hardcore-ai/releases) page.
+2. **Open VS Code**.
+3. Go to the **Extensions** view (`Ctrl+Shift+X`).
+4. Click the **`...`** (top right) → **"Install from VSIX..."**.
+5. Select the downloaded file.
 
-# Install Desktop App
-cd hardcore-desktop
-npm install
+---
 
-# Install Backend
-cd ../Hardcore.ai
-pip install -r requirements.txt
-```
+## ⚡ Quick Start
 
-### Running the App
+### 1. Wait for Auto-Setup
+Upon first launch, HARDCOREAI will build its internal "Diagnostic Brain." Watch the status bar for:
+`"Setting up HARDCOREAI Intelligence Layer..."`
 
-**Option 1: One-Click Launch (Windows)**
-```bash
-# From root directory
-./LAUNCH_DESKTOP.bat
-```
+### 2. Configure your API Key
+To enable AI reasoning:
+1. Go to **Settings** (`Ctrl + ,`).
+2. Search for **"Hardcoreai"**.
+3. Enter your **Gemini API Key**.
 
-**Option 2: Manual Launch**
-```bash
-# Terminal 1: Start Backend
-cd Hardcore.ai/orchestrator
-python main.py
+### 3. Start Monitoring
+1. Connect your debugger (ST-Link/J-Link) to your target board.
+2. Press `Ctrl+Shift+P` → **`HARDCOREAI: Start Live Hardware Monitor`**.
+3. Enter your interface (e.g., `interface/stlink.cfg`) and target (e.g., `target/stm32f1x.cfg`).
 
-# Terminal 2: Start Desktop App
-cd hardcore-desktop
-npm run dev
-```
+---
 
-The app will open at `http://localhost:5173`
+## 🛠️ Requirements
 
-## 📁 Project Structure
+- **Python 3.10+** installed on your system.
+- **OpenOCD** (The extension will try to auto-find it in your STM32CubeIDE or Downloads folders).
+- **ARM GNU Toolchain** (for GDB diagnostics).
 
-```
-hardcoreai/
-├── hardcore-desktop/     # Electron + React Desktop App
-│   ├── src/             # React components & frontend
-│   ├── electron/        # Electron main process
-│   └── package.json
-│
-├── Hardcore.ai/         # Python Backend (AI + Build)
-│   ├── orchestrator/    # AI & firmware generation
-│   │   ├── ai.py       # Gemini AI integration
-│   │   ├── main.py     # FastAPI server
-│   │   └── ...
-│   └── requirements.txt
-│
-└── LAUNCH_DESKTOP.bat   # One-click launcher
-```
-
-## ⚙️ Configuration
-
-### Gemini API Key
-
-1. Get a free API key from [Google AI Studio](https://aistudio.google.com/apikey)
-2. Create `Hardcore.ai/.env`:
-   ```
-   LLM_API_KEY=your_gemini_api_key_here
-   ```
-
-### Supported Boards
-
-- ESP32 DevKit
-- Arduino Uno/Nano/Mega
-- STM32 (various)
-- RP2040 (Pico)
-
-## 🛠️ Building for Distribution
-
-```bash
-cd hardcore-desktop
-
-# Windows
-npm run package:win
-
-# macOS
-npm run package:mac
-
-# Linux
-npm run package:linux
-
-# All platforms
-npm run package:all
-```
-
-Outputs will be in `hardcore-desktop/dist/`
-
-## 📖 Usage
-
-1. **Detect your board** - Click "Detect" in the top bar
-2. **Describe your project** - Type in the AI assistant:
-   > "Make a motor controller using L298N with pins ENA-19, IN1-21, IN2-18, move forward for 3 seconds then stop"
-3. **Review generated code** - Check the editor
-4. **Flash to hardware** - Click "Flash" button
+---
 
 ## 🤝 Contributing
 
-Contributions are welcome! Please read our contributing guidelines before submitting PRs.
+We welcome contributions to the hardware reasoning engine and UI components. Please submit PRs or open issues on our [GitHub Repo](https://github.com/Hardcoreaiin/hardcore-ai).
 
 ## 📄 License
 
 MIT License - see [LICENSE](LICENSE) for details.
 
-## 🙏 Acknowledgments
-
-- Google Gemini API for AI capabilities
-- PlatformIO for build system
-- Electron & React for desktop framework
-
 ---
 
-**Made with ❤️ by the Hardcore.ai Team**
+**Made with ❤️ by the HardcoreAI Team**
