@@ -26,17 +26,20 @@ class OpenOCDAdapter(HardwareAdapter):
             user_profile = os.environ.get('USERPROFILE', '')
             program_files = os.environ.get('ProgramFiles', 'C:\\Program Files')
             
-            # Common search patterns
+            # Optimized search patterns (Limited depth for speed)
             search_patterns = [
-                os.path.join(user_profile, "Downloads", "**", name_ext),
-                "C:\\ST\\**\\" + name_ext,
-                os.path.join(program_files, "**", name_ext),
-                os.path.join(user_profile, "AppData", "Local", "**", name_ext)
+                os.path.join(user_profile, "Downloads", "*", name_ext),
+                os.path.join(user_profile, "Downloads", "*", "*", name_ext),
+                "C:\\ST\\" + name_ext,
+                "C:\\ST\\**\\" + name_ext, # ST folder is usually safe for recursive
+                os.path.join(program_files, "OpenOCD*", "bin", name_ext),
+                os.path.join(user_profile, "AppData", "Local", "Programs", "**", name_ext)
             ]
             
-            print(f"[Discovery] Searching for {name_ext} in common folders...")
+            print(f"[Discovery] Searching for {name_ext} (Fast scan)...")
             for pattern in search_patterns:
-                matches = glob.glob(pattern, recursive=True)
+                recursive = "**" in pattern
+                matches = glob.glob(pattern, recursive=recursive)
                 if matches:
                     found = matches[0]
                     print(f"[Discovery] Found {name} at: {found}")
