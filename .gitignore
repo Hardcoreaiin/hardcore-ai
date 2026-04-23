@@ -8,7 +8,7 @@
 node_modules/
 dist/
 out/
-*.vsix
+# *.vsix (Removed from ignore to allow GitHub distribution)
 
 # Python
 __pycache__/
