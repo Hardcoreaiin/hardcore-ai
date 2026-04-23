@@ -81,29 +81,30 @@ class OpenOCDAdapter(HardwareAdapter):
                 print(f"[Discovery] Using OpenOCD script library: {p}")
                 break
 
-        cmd = [self.binary_path]
-        if scripts_path:
-            cmd.extend(["-s", scripts_path])
+        # Normalize all paths for Windows
+        binary = os.path.normpath(self.binary_path)
+        scripts = os.path.normpath(scripts_path) if scripts_path else None
         
+        cmd = [binary]
+        if scripts:
+            cmd.extend(["-s", scripts])
         cmd.extend(["-f", interface, "-f", target])
-        
+
+        print(f"[OpenOCD] Launching: {' '.join(cmd)}")
         try:
-            # Start OpenOCD in the background
             self.process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
             )
             
-            # Wait a few seconds for it to initialize
-            time.sleep(2)
-            if self.process.poll() is None:
-                self._connected = True
-                return True
-            else:
+            # Brief wait to see if it crashes immediately
+            time.sleep(1.0)
+            if self.process.poll() is not None:
                 _, stderr = self.process.communicate()
-                print(f"[OpenOCD] CRITICAL ERROR: {stderr.strip()}")
+                print(f"[OpenOCD] CRITICAL ERROR: {stderr}")
                 return False
         except Exception as e:
             print(f"[OpenOCD] Startup exception: {e}")
