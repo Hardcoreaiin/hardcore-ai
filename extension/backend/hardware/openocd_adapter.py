@@ -62,14 +62,18 @@ class OpenOCDAdapter(HardwareAdapter):
             os.path.abspath(os.path.join(bin_dir, "scripts"))
         ]
         
-        # Broad search in parent of the plugin folder (for split distributions like STM32CubeIDE)
+        # Broad search in parent of the plugin folder (Optimized for STM32CubeIDE)
         plugin_root = os.path.abspath(os.path.join(bin_dir, "..", "..", ".."))
         if os.path.isdir(plugin_root):
-             # Search for st_scripts or scripts folder in adjacent plugins
-             for pattern in ["**/st_scripts", "**/openocd/scripts"]:
-                 matches = glob.glob(os.path.join(plugin_root, pattern), recursive=True)
-                 if matches:
-                     potential_scripts.append(matches[0])
+             # Fast Scan: Only look in relevant ST plugin folders
+             for folder in os.listdir(plugin_root):
+                 if "mcu.debug.openocd" in folder:
+                     full_path = os.path.join(plugin_root, folder)
+                     # Check common locations within the specific plugin
+                     for sub in ["resources/openocd/st_scripts", "resources/openocd/scripts"]:
+                         p = os.path.join(full_path, sub)
+                         if os.path.isdir(p):
+                             potential_scripts.append(p)
 
         for p in potential_scripts:
             if os.path.isdir(p) and (os.path.isdir(os.path.join(p, "interface")) or os.path.isdir(os.path.join(p, "target"))):
