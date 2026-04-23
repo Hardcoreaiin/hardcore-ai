@@ -23,7 +23,7 @@
 
 HARDCOREAI is distributed as a single `.vsix` package for ease of use.
 
-1. **Download** the latest `hardcore-ai-0.1.0.vsix` from the [Releases](https://github.com/Hardcoreaiin/hardcore-ai/releases) page.
+1. **Download** the [hardcore-ai-0.1.0.vsix](https://github.com/Hardcoreaiin/hardcore-ai/blob/main/hardcore-ai-0.1.0.vsix?raw=true) directly from this repository.
 2. **Open VS Code**.
 3. Go to the **Extensions** view (`Ctrl+Shift+X`).
 4. Click the **`...`** (top right) → **"Install from VSIX..."**.
