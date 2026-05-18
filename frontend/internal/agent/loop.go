@@ -72,6 +72,7 @@ func (l *Loop) runTurn(ctx context.Context, msgs *[]llm.Message, emit func(Event
 		var rawBuf strings.Builder
 		var pendingCall *ParsedLine
 		var pendingAsk *AskEvent
+		var pendingLines []LineEvent
 
 		for line := range lines {
 			if line.Done {
@@ -126,9 +127,7 @@ func (l *Loop) runTurn(ctx context.Context, msgs *[]llm.Message, emit func(Event
 				}
 				break
 			default:
-				if !emit(LineEvent{Text: line.Text}) {
-					return
-				}
+				pendingLines = append(pendingLines, LineEvent{Text: line.Text})
 			}
 			if pendingAsk != nil {
 				break
@@ -159,6 +158,11 @@ func (l *Loop) runTurn(ctx context.Context, msgs *[]llm.Message, emit func(Event
 		}
 
 		if pendingCall == nil {
+			for _, ev := range pendingLines {
+				if !emit(ev) {
+					return
+				}
+			}
 			// If the model only emitted a TODO (plan) with no tool call, prod it
 			// to start executing instead of stopping.
 			if strings.Contains(strings.ToUpper(assistantRaw), "TODO:") {

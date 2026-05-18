@@ -4,6 +4,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -577,23 +578,33 @@ func (m *Model) route(ev agent.Event) {
 
 	case agent.ToolStartEvent:
 		m.toolPanel.Handle(ev)
-		m.chat.Handle(ev)
 		if m.todoBubble != nil {
 			m.todoBubble.Handle(ev)
+		}
+		if m.masonry != nil {
+			m.masonry.AddToolCall(e)
 		}
 		m.routeToolStart(e)
 
 	case agent.ToolResultEvent:
 		m.toolPanel.Handle(ev)
-		m.chat.Handle(ev)
+		if m.masonry != nil {
+			m.masonry.ApplyToolResult(e)
+		}
 		m.routeToolResult(e)
 
 	case agent.CodeFenceEvent:
-		code := m.masonry.Code()
-		code.UpdateFence(e.Lang, e.Content)
+		if m.masonry != nil {
+			code := m.masonry.Code()
+			code.UpdateFence(e.Lang, e.Content)
+		}
 
 	case agent.ArtifactEvent:
 		m.toolPanel.Handle(ev)
+		if m.masonry != nil {
+			m.masonry.ApplyArtifact(e)
+			m.routeArtifact(e)
+		}
 
 	case agent.UserMessageEvent:
 		m.chat.Handle(ev)
@@ -621,6 +632,22 @@ func (m *Model) route(ev agent.Event) {
 	if m.petBubble != nil {
 		m.petBubble.Handle(ev)
 		m.petRendered = ""
+	}
+}
+
+func (m *Model) routeArtifact(e agent.ArtifactEvent) {
+	if m.masonry == nil {
+		return
+	}
+	switch e.Artifact.Type {
+	case "project_dir":
+		if dir, ok := e.Artifact.Payload.(string); ok {
+			project := filepath.Base(filepath.Clean(dir))
+			if project != "." && project != string(filepath.Separator) {
+				m.masonry.FileTree().SetProject(project)
+				m.masonry.BuildStatus().SetProject(project)
+			}
+		}
 	}
 }
 
@@ -672,6 +699,8 @@ func (m *Model) routeToolStart(e agent.ToolStartEvent) {
 				ft.SetProject(name)
 			}
 		}
+	case "workspace_status":
+		m.masonry.FileTree()
 	case "file_write":
 		code := m.masonry.Code()
 		ft := m.masonry.FileTree()
@@ -747,10 +776,31 @@ func (m *Model) routeToolResult(e agent.ToolResultEvent) {
 			if len(args) > 0 {
 				if name, ok := args[0].(string); ok {
 					m.masonry.FileTree().SetProject(name)
+					m.masonry.BuildStatus().SetProject(name)
 				}
 			}
 		}
+	case "workspace_status":
+		ft := m.masonry.FileTree()
+		if current := parseWorkspaceCurrent(result); current != "" {
+			ft.SetProject(current)
+			m.masonry.BuildStatus().SetProject(current)
+		}
 	}
+}
+
+func parseWorkspaceCurrent(result string) string {
+	for _, line := range strings.Split(result, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "current project:") {
+			rest := strings.TrimSpace(strings.TrimPrefix(line, "current project:"))
+			if rest == "" {
+				return ""
+			}
+			return strings.Fields(rest)[0]
+		}
+	}
+	return ""
 }
 
 func (m *Model) extractWriteFileArgs() (path, content string) {
@@ -771,7 +821,8 @@ func (m *Model) View() string {
 	case stateWelcome:
 		hint := lipgloss.NewStyle().Foreground(m.theme.Muted).
 			Render("press any key to continue…")
-		return m.welcome.View(m.width) + "\n" + hint
+		content := lipgloss.JoinVertical(lipgloss.Center, m.welcome.View(m.width), hint)
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
 	}
 	return m.chatView()
 }
@@ -828,7 +879,7 @@ func (m *Model) chatView() string {
 		leftStr := strings.Join(left, "\n")
 		rightStr := m.masonry.View(rightW, m.tick)
 
-		vpContent = lipgloss.JoinHorizontal(lipgloss.Top,
+		vpContent = lipgloss.JoinHorizontal(lipgloss.Bottom,
 			lipgloss.NewStyle().Width(leftW).Render(leftStr),
 			" ",
 			lipgloss.NewStyle().Width(rightW).Render(rightStr),

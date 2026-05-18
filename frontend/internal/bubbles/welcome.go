@@ -2,7 +2,6 @@ package bubbles
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/theme"
 	"github.com/charmbracelet/lipgloss"
@@ -42,19 +41,26 @@ func (w *Welcome) SetTheme(t *theme.Theme) { w.theme = t }
 func (w *Welcome) SetPet(art string)       { w.Pet = art }
 
 func (w *Welcome) View(width int) string {
-	if width < 40 {
-		width = 40
+	if width < 48 {
+		width = 48
+	}
+	boxW := width - 4
+	if boxW > 104 {
+		boxW = 104
+	}
+	if boxW < 44 {
+		boxW = 44
 	}
 	t := w.theme
 
 	header := lipgloss.NewStyle().Foreground(t.Accent).Bold(true).
 		Render(fmt.Sprintf("hardcore-ai %s", w.Version))
 
-	bot := lipgloss.NewStyle().Foreground(t.Accent).Render(w.Pet)
+	bot := renderPetArt(w.Pet, t)
 	greet := lipgloss.NewStyle().Foreground(t.Text).Bold(true).
 		Render(fmt.Sprintf("welcome back %s!", w.User))
 	cwd := lipgloss.NewStyle().Foreground(t.Muted).
-		Render(w.Cwd)
+		Render(truncateMiddle(w.Cwd, boxW/2))
 
 	left := lipgloss.JoinVertical(lipgloss.Center, greet, bot, cwd)
 
@@ -74,28 +80,51 @@ func (w *Welcome) View(width int) string {
 	}
 	right := lipgloss.JoinVertical(lipgloss.Left,
 		tipsHeader,
-		strings.Join(tipLines, "\n"),
+		lipgloss.JoinVertical(lipgloss.Left, tipLines...),
 		"",
 		newsHeader,
-		strings.Join(newsLines, "\n"),
+		lipgloss.JoinVertical(lipgloss.Left, newsLines...),
 	)
 
-	inner := width - 6
-	leftW := inner / 3
-	rightW := inner - leftW - 2
+	inner := boxW - 6
+	leftW := inner * 42 / 100
+	if leftW < 28 {
+		leftW = 28
+	}
+	rightW := inner - leftW - 3
+	if rightW < 24 {
+		rightW = 24
+		leftW = inner - rightW - 3
+	}
 
 	leftBlock := lipgloss.NewStyle().Width(leftW).Align(lipgloss.Center).Render(left)
-	rightBlock := lipgloss.NewStyle().Width(rightW).Render(right)
-	sep := lipgloss.NewStyle().Foreground(t.BorderMuted).Render(strings.Repeat("│\n", lipgloss.Height(leftBlock)))
+	rightBlock := lipgloss.NewStyle().
+		Width(rightW).
+		BorderLeft(true).
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderForeground(t.BorderMuted).
+		PaddingLeft(2).
+		Render(right)
 
-	body := lipgloss.JoinHorizontal(lipgloss.Top, leftBlock, " "+sep+" ", rightBlock)
+	body := lipgloss.JoinHorizontal(lipgloss.Center, leftBlock, "  ", rightBlock)
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(t.Accent).
 		Padding(1, 2).
-		Width(width - 2)
+		Width(boxW)
 
 	titled := lipgloss.JoinVertical(lipgloss.Left, header, "", body)
 	return box.Render(titled)
+}
+
+func truncateMiddle(s string, max int) string {
+	r := []rune(s)
+	if max < 12 || len(r) <= max {
+		return s
+	}
+	keep := max - 1
+	left := keep / 2
+	right := keep - left
+	return string(r[:left]) + "…" + string(r[len(r)-right:])
 }

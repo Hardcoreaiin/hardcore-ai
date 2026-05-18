@@ -113,22 +113,22 @@ func (p *PetBubble) Handle(ev agent.Event) {
 // View renders the pet bubble. tick drives animations (increment externally on each clock tick).
 func (p *PetBubble) View(width, tick int) string {
 	t := p.theme
-	petStyle := lipgloss.NewStyle().Foreground(t.Accent)
 	nameStyle := lipgloss.NewStyle().Foreground(t.Muted).Italic(true)
 	thinkStyle := lipgloss.NewStyle().Foreground(t.Muted).Italic(true)
 	idleStyle := lipgloss.NewStyle().Foreground(t.Muted).Italic(true)
 
 	// Build pet column: art + name
 	artLines := strings.Split(p.art, "\n")
+	renderedArt := strings.Split(renderPetArt(p.art, t), "\n")
 	petWidth := 0
 	for _, l := range artLines {
-		if len(l) > petWidth {
-			petWidth = len(l)
+		if w := lipgloss.Width(l); w > petWidth {
+			petWidth = w
 		}
 	}
 	petColWidth := petWidth + 2
 
-	petCol := append([]string{}, artLines...)
+	petCol := append([]string{}, renderedArt...)
 	if p.name != "" {
 		petCol = append(petCol, nameStyle.Render(p.name))
 	}
@@ -191,7 +191,7 @@ func (p *PetBubble) View(width, tick int) string {
 	colStyle := lipgloss.NewStyle().Width(petColWidth)
 	var rows []string
 	for i := 0; i < totalHeight; i++ {
-		left := colStyle.Render(petStyle.Render(petCol[i]))
+		left := colStyle.Render(petCol[i])
 		rows = append(rows, left+"  "+speechLines[i])
 	}
 
@@ -201,6 +201,37 @@ func (p *PetBubble) View(width, tick int) string {
 		Padding(0, 1).
 		Width(width - 2).
 		Render(strings.Join(rows, "\n"))
+}
+
+func renderPetArt(art string, t *theme.Theme) string {
+	if t == nil {
+		return art
+	}
+	outline := lipgloss.NewStyle().Foreground(t.Accent)
+	eye := lipgloss.NewStyle().Foreground(t.UserFg).Bold(true)
+	shade := lipgloss.NewStyle().Foreground(t.BorderMuted)
+	dark := lipgloss.NewStyle().Foreground(t.Muted)
+
+	var b strings.Builder
+	for _, r := range art {
+		switch r {
+		case 'o', 'O', '0':
+			b.WriteString(eye.Render(string(r)))
+		case '.', ':', ';':
+			b.WriteString(shade.Render(string(r)))
+		case '\'', '"', '`':
+			b.WriteString(shade.Render(string(r)))
+		case '^', '-', '_', '=':
+			b.WriteString(dark.Render(string(r)))
+		case '\n':
+			b.WriteRune(r)
+		case ' ':
+			b.WriteRune(r)
+		default:
+			b.WriteString(outline.Render(string(r)))
+		}
+	}
+	return b.String()
 }
 
 func (p *PetBubble) renderMarkdown(src string, width int, t *theme.Theme) string {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/agent"
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/bubbles"
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/theme"
 	"github.com/charmbracelet/lipgloss"
@@ -61,6 +62,33 @@ func (m *MasonryManager) Activate(kind string) *masonryEntry {
 	}
 	m.entries = append(m.entries, e)
 	return e
+}
+
+func (m *MasonryManager) AddToolCall(start agent.ToolStartEvent) {
+	m.gens["toolcall"]++
+	m.entries = append(m.entries, &masonryEntry{
+		id:     BubbleID{Kind: "toolcall", Gen: m.gens["toolcall"]},
+		bubble: bubbles.NewToolCall(start, m.theme),
+	})
+}
+
+func (m *MasonryManager) ApplyToolResult(result agent.ToolResultEvent) {
+	for i := len(m.entries) - 1; i >= 0; i-- {
+		tc, ok := m.entries[i].bubble.(*bubbles.ToolCall)
+		if ok && tc.Name == result.Name && !tc.HasResult {
+			tc.ApplyResult(result)
+			return
+		}
+	}
+}
+
+func (m *MasonryManager) ApplyArtifact(a agent.ArtifactEvent) {
+	for i := len(m.entries) - 1; i >= 0; i-- {
+		if tc, ok := m.entries[i].bubble.(*bubbles.ToolCall); ok {
+			tc.ApplyArtifact(a)
+			return
+		}
+	}
 }
 
 func (m *MasonryManager) newBubble(kind string) bubbles.Bubble {

@@ -53,9 +53,9 @@ func (t *ToolCall) View(width int) string {
 	artifact := lipgloss.NewStyle().Foreground(t.theme.Accent)
 
 	var b strings.Builder
-	b.WriteString(callName.Render(t.Name+"(") + formatArgs(t.Args) + callName.Render(")"))
+	b.WriteString(callName.Render(t.Name+"(") + formatToolArgs(t.Name, t.Args, width-12) + callName.Render(")"))
 	if t.HasResult {
-		b.WriteString(" → " + resultStr.Render(truncate(t.Result, width-len(t.Name)-12)))
+		b.WriteString("\n" + resultStr.Render(truncate(strings.ReplaceAll(t.Result, "\n", " "), width-6)))
 	} else {
 		b.WriteString(" " + lipgloss.NewStyle().Faint(true).Render("…"))
 	}
@@ -63,6 +63,19 @@ func (t *ToolCall) View(width int) string {
 		b.WriteString("\n" + artifact.Render(fmt.Sprintf("⚑ %s: %v", a.Artifact.Type, a.Artifact.Payload)))
 	}
 	return border.Width(width - 2).Render(b.String())
+}
+
+func formatToolArgs(name string, args []any, max int) string {
+	if max < 16 {
+		max = 16
+	}
+	if name == "file_write" && len(args) >= 2 {
+		path, _ := args[0].(string)
+		content, _ := args[1].(string)
+		return fmt.Sprintf("%q, %d bytes", path, len(content))
+	}
+	out := formatArgs(args)
+	return truncate(out, max)
 }
 
 func formatArgs(args []any) string {
