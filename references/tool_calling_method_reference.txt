@@ -1,0 +1,444 @@
+"""
+LLM Tool-Calling Reference (C-like, non-JSON)
+=============================================
+
+A single-file distillation of this project's tool-calling methodology, intended
+as context for other projects.
+
+Why not JSON?
+-------------
+Most LLM tool-calling stacks force the model to emit JSON (`{"name": ...,
+"arguments": {...}}`). Small/local models burn tokens on braces, quotes, and
+escaping, and frequently produce invalid JSON. This project instead has the
+model emit a C-style function call:
+
+    THINK: I need to add two numbers.
+    CALL calculator("2 + 2")
+
+That format is:
+  - shorter (fewer tokens than JSON)
+  - easier for small models to produce reliably
+  - trivial to parse with a hand-written tokenizer
+  - human-readable in the transcript
+
+Architecture
+------------
+1. Tool registry          — decorator collects tools + their pydantic param model.
+2. System prompt builder  — renders tools as C-like signatures.
+3. Response parser        — finds THINK / CALL lines and tokenizes the args.
+4. Execution loop         — call LLM → parse → execute tool → feed result back →
+                            loop until the model produces a plain (no-CALL) reply.
+
+The LLM backend here is an OpenAI-compatible `/v1/chat/completions` endpoint
+(llama.cpp server, vLLM, Ollama, etc.). Swap `_llm_call` if you use a different
+provider.
+"""
+
+from __future__ import annotations
+
+import ast
+import asyncio
+import json
+import operator
+from dataclasses import dataclass
+from typing import Any, Callable
+
+import httpx
+from pydantic import BaseModel, Field
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. TOOL REGISTRY
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class ToolSpec:
+    name: str
+    description: str
+    func: Callable
+    param_model: type[BaseModel]
+    return_type: str
+
+
+_REGISTRY: dict[str, ToolSpec] = {}
+
+
+def register_tool(param_model: type[BaseModel], return_type: str = "str"):
+    """Decorator: register a function as an LLM-callable tool.
+
+    The docstring becomes the tool description shown to the model.
+    `param_model` is a pydantic BaseModel describing the arguments — it doubles
+    as validation and as the source of the C-like signature in the prompt.
+    """
+    def decorator(func: Callable) -> Callable:
+        _REGISTRY[func.__name__] = ToolSpec(
+            name=func.__name__,
+            description=(func.__doc__ or "").strip(),
+            func=func,
+            param_model=param_model,
+            return_type=return_type,
+        )
+        return func
+    return decorator
+
+
+def get_all_tools() -> dict[str, ToolSpec]:
+    return dict(_REGISTRY)
+
+
+def execute_tool(name: str, kwargs: dict[str, Any]) -> Any:
+    if name not in _REGISTRY:
+        raise KeyError(f"Tool '{name}' not found. Available: {list(_REGISTRY)}")
+    spec = _REGISTRY[name]
+    validated = spec.param_model(**kwargs)
+    return spec.func(**validated.model_dump())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. PROMPT BUILDER + PARSER (C-like, non-JSON)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ParseError(Exception):
+    pass
+
+
+_TYPE_MAP = {"str": "str", "int": "int", "float": "float", "bool": "bool"}
+
+
+def _annotation_name(annotation) -> str:
+    if annotation is None:
+        return "str"
+    if getattr(annotation, "__origin__", None) is not None:
+        return "str"
+    return _TYPE_MAP.get(getattr(annotation, "__name__", ""), "str")
+
+
+def build_system_prompt(tools: dict[str, ToolSpec]) -> str:
+    """Render the tool list as C-like signatures and append the call protocol."""
+    lines = []
+    for spec in tools.values():
+        fields = spec.param_model.model_fields
+        params = ", ".join(
+            f"{fname}:{_annotation_name(finfo.annotation)}"
+            for fname, finfo in fields.items()
+        )
+        lines.append(f"{spec.name}({params})  # {spec.description}")
+
+    tool_block = "\n".join(lines)
+    return (
+        "You are a helpful assistant with access to tools.\n\n"
+        f"Tools:\n{tool_block}\n\n"
+        "Format:\n"
+        "Whenever you want to use a tool, you MUST write:\n"
+        "THINK: <one sentence: what you just learned and what you will do next>\n"
+        "CALL name(\"arg1\", arg2)\n\n"
+        "Rules:\n"
+        "- Always reason in THINK before each CALL. Never skip THINK.\n"
+        "- After a tool result, write another THINK line before your next CALL.\n"
+        "- Never ask the user for information you can discover with a tool.\n"
+        "- If no tool is needed, reply normally without THINK or CALL."
+    )
+
+
+def parse_response(
+    raw: str,
+    tools: dict[str, ToolSpec],
+) -> tuple[str, str, dict[str, Any]] | None:
+    """Scan the model's reply for a THINK/CALL pair.
+
+    Returns (thought, func_name, kwargs) on the first valid CALL found, or None
+    if no parsable call is present (in which case `raw` is the final answer).
+    """
+    thought = ""
+    for line in raw.splitlines():
+        stripped = line.strip()
+
+        if stripped.upper().startswith("THINK:"):
+            thought = stripped[6:].strip()
+            continue
+
+        call_str = None
+        if stripped.upper().startswith("CALL"):
+            call_str = stripped[4:].lstrip(":= ").strip()
+        elif "<|tool_call>" in stripped:
+            # Some models emit a tool-call sentinel; tolerate it.
+            after = stripped.split("<|tool_call>", 1)[1]
+            call_str = after.lstrip("call:Call: ").strip()
+
+        if call_str:
+            try:
+                func_name, kwargs = _parse_call(call_str, tools)
+                return thought, func_name, kwargs
+            except ParseError:
+                continue
+
+    return None
+
+
+def _parse_call(call_str: str, tools: dict[str, ToolSpec]) -> tuple[str, dict[str, Any]]:
+    """Parse `name(arg1, arg2, ...)` into (name, kwargs).
+
+    Arguments are matched positionally against the pydantic model's field order,
+    so the model never has to name them — keeps tokens low.
+    """
+    paren_idx = call_str.find("(")
+    if paren_idx == -1:
+        raise ParseError(f"No opening parenthesis: {call_str}")
+
+    func_name = call_str[:paren_idx].strip()
+    if func_name not in tools:
+        raise ParseError(f"Unknown function: {func_name}")
+
+    if not call_str.rstrip().endswith(")"):
+        raise ParseError(f"No closing parenthesis: {call_str}")
+
+    args_str = call_str[paren_idx + 1:-1].strip()
+    tokens = _tokenize(args_str) if args_str else []
+
+    spec = tools[func_name]
+    field_names = list(spec.param_model.model_fields.keys())
+
+    kwargs: dict[str, Any] = {}
+    for i, token in enumerate(tokens):
+        if i >= len(field_names):
+            raise ParseError(f"Too many arguments for {func_name}")
+        kwargs[field_names[i]] = token
+
+    return func_name, kwargs
+
+
+def _tokenize(args_str: str) -> list[Any]:
+    """Split arg list. Handles "quoted strings" (with \\-escapes) and bare
+    tokens separated by commas. Also strips `key: value` named-arg prefixes the
+    model may produce, and coerces ints/floats/bools."""
+    tokens: list[Any] = []
+    i = 0
+    n = len(args_str)
+
+    while i < n:
+        # skip whitespace + commas between args
+        while i < n and args_str[i] in (" ", "\t", ","):
+            i += 1
+        if i >= n:
+            break
+
+        if args_str[i] == '"':
+            i += 1
+            parts = []
+            while i < n and args_str[i] != '"':
+                if args_str[i] == "\\" and i + 1 < n:
+                    parts.append(args_str[i + 1])
+                    i += 2
+                else:
+                    parts.append(args_str[i])
+                    i += 1
+            if i < n:
+                i += 1  # closing quote
+            tokens.append("".join(parts))
+        else:
+            start = i
+            while i < n and args_str[i] not in (",", ")"):
+                i += 1
+            raw = args_str[start:i].strip()
+
+            # Strip `key: value` if model emitted a named arg.
+            colon = raw.find(":")
+            if colon != -1:
+                key = raw[:colon].strip()
+                if key and " " not in key:
+                    raw = raw[colon + 1:].strip().strip('"')
+
+            tokens.append(_coerce(raw))
+
+    return tokens
+
+
+def _coerce(raw: str) -> Any:
+    """Best-effort cast of a bare token to bool/int/float/None, else str."""
+    # Strip type prefixes some models echo back: "s:foo", "i:5", "f:1.2", "b:true"
+    if len(raw) >= 2 and raw[1] == ":" and raw[0] in "sifb":
+        raw = raw[2:]
+    if raw.lower() == "true":
+        return True
+    if raw.lower() == "false":
+        return False
+    if raw.lower() == "null":
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        pass
+    try:
+        return float(raw)
+    except ValueError:
+        pass
+    return raw
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. LLM CALL + EXECUTION LOOP
+# ─────────────────────────────────────────────────────────────────────────────
+
+LLAMA_URL = "http://localhost:8080/v1/chat/completions"
+MODEL_ID = "Abiray/gemma-4-E4B-it-OBLITERATED-GGUF:Q4_K_M"
+MAX_TOOL_STEPS = 10
+
+
+async def _llm_call(
+    client: httpx.AsyncClient,
+    model: str,
+    messages: list[dict],
+) -> str:
+    """Stream a completion from an OpenAI-compatible endpoint, return full text."""
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": True,
+        "temperature": 0.0,
+        "max_tokens": 512,
+    }
+    chunks: list[str] = []
+    async with client.stream("POST", LLAMA_URL, json=payload) as resp:
+        async for line in resp.aiter_lines():
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            token = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+            if token:
+                chunks.append(token)
+    return "".join(chunks)
+
+
+async def run_agent(user_prompt: str, model: str = MODEL_ID) -> str:
+    """Drive the THINK/CALL loop until the model emits a plain-text answer.
+
+    Returns the final assistant message.
+    """
+    tools = get_all_tools()
+    messages: list[dict] = [
+        {"role": "system", "content": build_system_prompt(tools)},
+        {"role": "user", "content": user_prompt},
+    ]
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        for step in range(MAX_TOOL_STEPS):
+            raw = await _llm_call(client, model, messages)
+            parsed = parse_response(raw, tools)
+
+            if parsed is None:
+                # No CALL found → this is the final answer.
+                return raw
+
+            thought, func_name, kwargs = parsed
+            print(f"[step {step}] THINK: {thought}")
+            print(f"[step {step}] CALL  {func_name}({kwargs})")
+
+            try:
+                result = execute_tool(func_name, kwargs)
+                result_str = str(result)
+            except Exception as e:
+                result_str = f"ERROR: {e}"
+
+            print(f"[step {step}] RESULT: {result_str}")
+
+            # Feed the model its own emission + the tool result, then loop.
+            messages.append({"role": "assistant", "content": raw})
+            messages.append({"role": "user", "content": f"Tool result: {result_str}"})
+
+    return "Tool step limit reached"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. DEMO TOOLS  (so the file is runnable as-is)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class CalculatorArgs(BaseModel):
+    expression: str = Field(description="Mathematical expression to evaluate")
+
+
+_AST_OPS = {
+    ast.Add: operator.add, ast.Sub: operator.sub,
+    ast.Mult: operator.mul, ast.Div: operator.truediv,
+    ast.Mod: operator.mod, ast.Pow: operator.pow,
+    ast.USub: operator.neg, ast.UAdd: operator.pos,
+}
+
+
+def _safe_eval(node: ast.expr) -> float:
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return float(node.value)
+    if isinstance(node, ast.BinOp):
+        return _AST_OPS[type(node.op)](_safe_eval(node.left), _safe_eval(node.right))
+    if isinstance(node, ast.UnaryOp):
+        return _AST_OPS[type(node.op)](_safe_eval(node.operand))
+    raise ValueError(f"Unsupported node: {type(node).__name__}")
+
+
+@register_tool(CalculatorArgs, return_type="float")
+def calculator(expression: str) -> float:
+    """Evaluate a math expression and return the numeric result. Supports + - * / % **."""
+    return _safe_eval(ast.parse(expression, mode="eval").body)
+
+
+class StringUtilsArgs(BaseModel):
+    text: str = Field(description="Input text")
+    operation: str = Field(description="One of: upper, lower, reverse, count_words")
+
+
+@register_tool(StringUtilsArgs)
+def string_utils(text: str, operation: str) -> str:
+    """Transform text. Operations: upper, lower, reverse, count_words."""
+    if operation == "upper":
+        return text.upper()
+    if operation == "lower":
+        return text.lower()
+    if operation == "reverse":
+        return text[::-1]
+    if operation == "count_words":
+        return str(len(text.split()))
+    return f"Unknown operation: {operation}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. EXAMPLE PROTOCOL TRACE  (what the wire actually looks like)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# System prompt (excerpt):
+#     Tools:
+#     calculator(expression:str)  # Evaluate a math expression ...
+#     string_utils(text:str, operation:str)  # Transform text ...
+#
+#     Format:
+#     THINK: <one sentence>
+#     CALL name("arg1", arg2)
+#
+# User:     "what is 17 * 23, then reverse the result as a string?"
+#
+# Model:    THINK: I need to compute 17 * 23 first.
+#           CALL calculator("17 * 23")
+#
+# Tool:     391.0
+#
+# Model:    THINK: Now reverse the string "391.0".
+#           CALL string_utils("391.0", reverse)
+#
+# Tool:     0.193
+#
+# Model:    The product is 391, and reversed as a string it's "0.193".
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+if __name__ == "__main__":
+    async def _demo():
+        answer = await run_agent(
+            "What is 17 * 23, and then reverse the result as a string?"
+        )
+        print("\nFINAL:", answer)
+
+    asyncio.run(_demo())

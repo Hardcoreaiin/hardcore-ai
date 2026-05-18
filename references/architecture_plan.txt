@@ -1,0 +1,293 @@
+hardcore-ai — Architecture Plan
+================================
+
+A Go port of the THINK/CALL agent loop (see tool_calling_method_reference.txt),
+wrapped in a spatial TUI called "Bubbles". The LLM never spends tokens on UI;
+it calls tools, tools emit artifacts, and the runtime summons bubbles that
+subscribe to those artifact types.
+
+
+────────────────────────────────────────────────────────────────────────────
+VISION: Bubbles
+────────────────────────────────────────────────────────────────────────────
+
+A collapsible AI-agent interface that starts as a minimal, beautiful CLI and
+expands on demand into a dynamic TUI made of modular "bubbles."
+
+  - The LLM never spends tokens controlling the UI.
+  - The LLM calls tools/functions.
+  - The runtime emits typed events and artifacts.
+  - BubbleOS automatically summons relevant bubbles: Diff, Tests, Logs,
+    Files, Plan, Approval, etc.
+  - Each tool declares which artifact types it produces.
+  - Each bubble subscribes to artifact types it knows how to render.
+  - Bubbles link to other bubbles via commands + shared state — never by
+    importing each other.
+  - Layout is automatic by default (Hyprland-like, spatial), with bubbles
+    positioning themselves based on priority, relation, and available space.
+  - When the user drags or resizes a bubble, that placement is remembered
+    globally, per project, or per session.
+
+Result: a modular, reactive, token-free UI layer. CLI is the product surface,
+TUI is the zoom lens, users teach the interface how they want their agent
+workspace arranged.
+
+
+────────────────────────────────────────────────────────────────────────────
+FOUR-LAYER ARCHITECTURE
+────────────────────────────────────────────────────────────────────────────
+
+  ┌───────────────────────────────────────────────────────────────────┐
+  │  Layout engine    (spatial placement, drag, persist prefs)        │
+  ├───────────────────────────────────────────────────────────────────┤
+  │  Bubble registry  (Chat, Thought, Diff, Tests, Logs, ...)         │
+  │                   each subscribes to artifact types               │
+  ├───────────────────────────────────────────────────────────────────┤
+  │  Event bus        (typed events + artifacts)                      │
+  │                   token, line, thought, toolStart, artifact,      │
+  │                   toolEnd, done, error                            │
+  ├───────────────────────────────────────────────────────────────────┤
+  │  Agent core       (THINK/CALL loop, parser, tool registry,        │
+  │                   LLM transport)                                  │
+  └───────────────────────────────────────────────────────────────────┘
+
+Key property: agent core is pure Go with no UI imports. It takes a prompt
+and produces a stream of events. The TUI subscribes. A headless CLI mode
+(`hardcore-ai --headless "do X"`) falls out for free.
+
+
+────────────────────────────────────────────────────────────────────────────
+TARGET FILE LAYOUT
+────────────────────────────────────────────────────────────────────────────
+
+  hardcore-ai/
+  ├── frontend/
+  │   ├── main.go                       # tiny: build agent + tui, run
+  │   ├── go.mod
+  │   └── internal/
+  │       ├── agent/                    # pure, no UI deps
+  │       │   ├── loop.go               # state machine
+  │       │   ├── prompt.go             # BuildSystemPrompt(tools)
+  │       │   ├── parser.go             # line-level: plain | think | call
+  │       │   ├── tokenizer.go          # tokenize args + coerce
+  │       │   └── events.go             # Event types emitted by the loop
+  │       │
+  │       ├── tools/
+  │       │   ├── registry.go           # reflection-based registry
+  │       │   ├── tool.go               # Tool interface + ToolSpec + Artifact
+  │       │   ├── calculator.go         # demo
+  │       │   └── string_utils.go       # demo
+  │       │
+  │       ├── llm/
+  │       │   ├── client.go             # interface: Stream(ctx, msgs) <-chan Token
+  │       │   └── openai.go             # OpenAI-compatible streaming impl
+  │       │
+  │       ├── bus/
+  │       │   └── bus.go                # typed pub/sub
+  │       │
+  │       ├── bubbles/
+  │       │   ├── bubble.go             # Bubble interface
+  │       │   ├── chat.go
+  │       │   ├── thought.go
+  │       │   ├── toolcall.go
+  │       │   ├── diff.go               # (placeholder)
+  │       │   ├── tests.go              # (placeholder)
+  │       │   └── logs.go               # (placeholder)
+  │       │
+  │       ├── layout/
+  │       │   ├── engine.go             # interface: Place(bubbles, viewport) []Rect
+  │       │   ├── stack.go              # v1 impl
+  │       │   └── prefs.go              # (later) persisted placements
+  │       │
+  │       └── tui/
+  │           ├── app.go                # root Bubble Tea model
+  │           ├── input.go
+  │           ├── keys.go
+  │           ├── markdown.go
+  │           └── styles.go
+  │
+  └── references/
+      ├── tool_calling_method_reference.txt
+      └── architecture_plan.txt   (this file)
+
+
+────────────────────────────────────────────────────────────────────────────
+DESIGN DECISIONS
+────────────────────────────────────────────────────────────────────────────
+
+Tool param schema
+-----------------
+Use struct tags + reflection (the Go-idiomatic stand-in for pydantic):
+
+    type CalculatorArgs struct {
+        Expression string `tool:"expression" desc:"math expression to evaluate"`
+    }
+
+The registry walks the struct once at startup to build the C-like signature
+for the prompt and remember field order. At call time it populates the
+struct positionally from parsed tokens. Same ergonomic feel as the
+@register_tool decorator in the Python reference.
+
+Streaming granularity
+---------------------
+Per-line. The LLM transport buffers raw tokens until it sees '\n', then
+emits a lineMsg. The parser inspects each line:
+  - plain text           → forward to chat
+  - "THINK: ..."         → forward as thought
+  - "CALL name(args)"    → buffer until complete, emit toolStart
+
+User sees reasoning live; bubbles appear the instant a tool fires.
+
+Agent loop = state machine
+--------------------------
+States: Idle → Streaming → (ToolPending → ToolRunning → ToolDone) → Streaming → ... → Done
+
+The loop is event-driven, not a blocking for-loop. Each state transition
+publishes to the event bus. This is what lets the TUI stay responsive and
+lets bubbles react in real time.
+
+Tool → Artifact binding
+-----------------------
+A tool returns Artifacts, not UI:
+
+    type Tool interface {
+        Spec() ToolSpec
+        Execute(ctx, args) ([]Artifact, error)
+    }
+
+    type Artifact struct {
+        Type    string   // "diff", "test_result", "log", "file_list", ...
+        Payload any
+    }
+
+The LLM only ever sees str(result) of the tool — same as the Python
+reference, zero UI tokens. Bubbles subscribe to artifact types. A "diff"
+artifact summons a Diff bubble whether it came from apply_patch or git_diff.
+
+Bubble linking
+--------------
+Bubbles publish `command` events on the bus (e.g. "bubble.summon: tests").
+Other bubbles subscribe. No bubble imports another bubble.
+
+Layout
+------
+Interface today, simple stacking impl for v1, spatial impl later. Same
+interface either way so the upgrade is a drop-in.
+
+
+────────────────────────────────────────────────────────────────────────────
+OPEN QUESTIONS (resolve before later phases)
+────────────────────────────────────────────────────────────────────────────
+
+  1. Spatial layout in v1 vs stacking v1 + spatial later.
+  2. Approval bubble — does the loop block on user approval for destructive
+     tools, or does the tool itself prompt?
+  3. Thought visibility — separate bubble or inline-faded in chat?
+  4. Config source — hardcoded / env vars / ~/.config/hardcore-ai/config.toml.
+
+
+────────────────────────────────────────────────────────────────────────────
+PHASED PLAN
+────────────────────────────────────────────────────────────────────────────
+
+PHASE 1 — Agent core (current focus)
+------------------------------------
+Headless. No TUI. Prints to stdout. Goal: prove the THINK/CALL loop works
+end-to-end against a real OpenAI-compatible endpoint, with per-line
+streaming, tool dispatch, and validation.
+
+  1.1  llm/client.go      — Client interface: Stream(ctx, msgs) (<-chan Line, error)
+                            Line = either text chunk (until newline) or stream-end.
+  1.2  llm/openai.go      — POST /v1/chat/completions with stream=true.
+                            Parse SSE "data: " frames. Buffer tokens until '\n',
+                            emit one Line per newline. Emit any trailing buffer
+                            on stream end.
+  1.3  tools/tool.go      — Tool interface, ToolSpec, Artifact type.
+  1.4  tools/registry.go  — Reflection-based Register[T any](fn func(T) (string, []Artifact, error)).
+                            Walk T's fields once: build signature, remember order.
+                            Execute(name, tokens []any) validates types,
+                            populates struct, calls fn.
+  1.5  tools/calculator.go + string_utils.go — port the demos from the Python ref.
+  1.6  agent/prompt.go    — BuildSystemPrompt(tools) — renders C-like signatures
+                            + the THINK/CALL protocol (verbatim from the ref).
+  1.7  agent/tokenizer.go — port _tokenize + _coerce: quoted strings with
+                            \-escapes, bare tokens, key: value stripping,
+                            bool/int/float/null coercion, s:/i:/f:/b: prefix strip.
+  1.8  agent/parser.go    — ParseLine(line) → one of {Plain, Think, Call}.
+                            Call = (funcName, []any tokens). Tolerate the
+                            "<|tool_call>" sentinel.
+  1.9  agent/events.go    — Event types: LineEvent, ThinkEvent, ToolStartEvent,
+                            ToolResultEvent, ArtifactEvent, DoneEvent, ErrorEvent.
+  1.10 agent/loop.go      — Run(ctx, prompt) <-chan Event.
+                            State machine: drive LLM stream → parse each line →
+                            on Call, execute tool, append assistant message +
+                            "Tool result: ..." user message, loop. Cap at
+                            MAX_TOOL_STEPS. Emit events at every transition.
+  1.11 main.go (temp)     — Subscribe to events, print them. Hardcoded prompt
+                            like "what is 17 * 23, then reverse the result?"
+
+Acceptance for Phase 1:
+  - Running `go run .` against a local llama.cpp server reproduces the
+    protocol trace at the bottom of tool_calling_method_reference.txt.
+  - Bad args (wrong type, too many) produce a validation error that the
+    loop feeds back to the model as "Tool result: ERROR: ..." so the model
+    can self-correct.
+  - Per-line streaming is visible: THINK lines print before the CALL line.
+
+PHASE 2 — Event bus + headless artifacts
+----------------------------------------
+  2.1  bus/bus.go         — Typed pub/sub. Publishers don't know subscribers.
+  2.2  Refactor agent/loop.go to publish through the bus instead of returning a channel.
+  2.3  Tools return Artifact slices. Loop publishes ArtifactEvent per artifact.
+  2.4  CLI subscriber prints artifacts in a readable form.
+
+PHASE 3 — TUI shell + first bubbles
+-----------------------------------
+  3.1  tui/app.go         — Bubble Tea root model. Owns a []Bubble and a layout engine.
+  3.2  bubbles/bubble.go  — Bubble interface (Init/Update/View/Subscribes).
+  3.3  bubbles/chat.go    — always-on conversation bubble.
+  3.4  bubbles/thought.go — faded THINK lines (or pending decision: inline).
+  3.5  bubbles/toolcall.go — collapsed "▸ calculator(2+2) → 4"
+  3.6  layout/stack.go    — simple stacking layout.
+  3.7  Wire bus events → bubble updates via tea.Cmd.
+
+PHASE 4 — Artifact bubbles
+--------------------------
+Diff, Tests, Logs, Files, Plan. Each subscribes to its artifact type.
+Add tools that produce those artifacts.
+
+PHASE 5 — Spatial layout
+------------------------
+Replace stack.go with a Hyprland-like engine. Add drag/resize.
+Persist user placements (prefs.go).
+
+PHASE 6 — Approval + destructive tools
+--------------------------------------
+Approval bubble. Loop pauses on tool-requires-approval. Wire it through
+the state machine.
+
+
+────────────────────────────────────────────────────────────────────────────
+WHAT WE'RE STARTING WITH RIGHT NOW
+────────────────────────────────────────────────────────────────────────────
+
+Phase 1 only. Headless agent core. Files to create, in order:
+
+  1. frontend/internal/llm/client.go
+  2. frontend/internal/llm/openai.go
+  3. frontend/internal/tools/tool.go
+  4. frontend/internal/tools/registry.go
+  5. frontend/internal/tools/calculator.go
+  6. frontend/internal/tools/string_utils.go
+  7. frontend/internal/agent/prompt.go
+  8. frontend/internal/agent/tokenizer.go
+  9. frontend/internal/agent/parser.go
+  10. frontend/internal/agent/events.go
+  11. frontend/internal/agent/loop.go
+  12. frontend/main.go (replace the Bubble Tea scaffold with a stdout driver
+      for now — the scaffold is preserved in git history and the TUI work
+      resumes in Phase 3)
+
+Success looks like: a terminal session that mirrors the protocol trace in
+tool_calling_method_reference.txt, against a real local LLM, with
+per-line streaming, working tool calls, and graceful validation errors.
