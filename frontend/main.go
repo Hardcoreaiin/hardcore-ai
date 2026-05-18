@@ -15,7 +15,9 @@ import (
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/config"
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/llm"
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/settings"
+	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/toolchain"
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/tools"
+	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/tools/stm32"
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/tui"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -36,6 +38,15 @@ func main() {
 	reg := tools.NewRegistry()
 	tools.RegisterCalculator(reg)
 	tools.RegisterStringUtils(reg)
+
+	tcMgr, err := toolchain.DefaultManager()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "toolchain manager init:", err)
+		os.Exit(1)
+	}
+	stm32.RegisterWorkspace(reg)
+	stm32.RegisterCompile(reg, tcMgr)
+	stm32.RegisterEmulate(reg, tcMgr)
 
 	cfg := config.Load()
 	client := buildClient(cfg)
@@ -79,7 +90,7 @@ func main() {
 		Existing: existing,
 		Loaded:   loaded,
 	})
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "tui error:", err)
 		os.Exit(1)

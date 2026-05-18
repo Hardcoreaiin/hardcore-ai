@@ -11,6 +11,8 @@ const (
 	LinePlain LineKind = iota
 	LineThink
 	LineCall
+	LineTodo
+	LineAsk
 )
 
 type ParsedLine struct {
@@ -30,6 +32,18 @@ func ParseLine(raw string) ParsedLine {
 		return ParsedLine{Kind: LineThink, Text: strings.TrimSpace(stripped[6:])}
 	}
 
+	if strings.HasPrefix(upper, "TODO:") {
+		body := strings.TrimSpace(stripped[5:])
+		items := splitPipe(body)
+		return ParsedLine{Kind: LineTodo, Text: body, Tokens: stringsToAny(items)}
+	}
+
+	if strings.HasPrefix(upper, "ASK:") {
+		body := strings.TrimSpace(stripped[4:])
+		parts := splitPipe(body)
+		return ParsedLine{Kind: LineAsk, Text: body, Tokens: stringsToAny(parts)}
+	}
+
 	var callBody string
 	switch {
 	case strings.HasPrefix(upper, "CALL"):
@@ -43,6 +57,26 @@ func ParseLine(raw string) ParsedLine {
 
 	name, tokens, err := parseCall(strings.TrimSpace(callBody))
 	return ParsedLine{Kind: LineCall, Text: raw, FuncName: name, Tokens: tokens, Err: err}
+}
+
+// splitPipe splits s on " | " (or "|") and trims each part.
+func splitPipe(s string) []string {
+	raw := strings.Split(s, "|")
+	out := make([]string, 0, len(raw))
+	for _, p := range raw {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func stringsToAny(ss []string) []any {
+	out := make([]any, len(ss))
+	for i, s := range ss {
+		out[i] = s
+	}
+	return out
 }
 
 func parseCall(s string) (string, []any, error) {

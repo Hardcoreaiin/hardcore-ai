@@ -1,8 +1,4 @@
 // Package tui is the Bubble Tea root model.
-//
-// The root walks through three states: onboarding (theme + trust), the
-// welcome splash, and the live chat. Onboarding only runs when no
-// .agent_settings/settings.json exists for the working directory.
 package tui
 
 import (
@@ -24,7 +20,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// state is the top-level screen the user is currently looking at.
 type state int
 
 const (
@@ -37,25 +32,39 @@ type Model struct {
 	ctx     context.Context
 	session *agent.Session
 
-	state   state
-	theme   *theme.Theme
-	root    string
-	user    string
-	version string
+	state    state
+	theme    *theme.Theme
+	root     string
+	user     string
+	version  string
 	trusted  bool
-	provider string // active LLM provider key
-	pet      string // pet species key (into pets.ByName)
-	petName  string // user-assigned nickname
+	provider string
+	pet      string
+	petName  string
 
 	onboard *onboarding
 	welcome *bubbles.Welcome
 
-	chat       *bubbles.Chat
-	thought    *bubbles.Thought
-	petBubble  *bubbles.PetBubble
-	system     []string // system messages from command results
-	historyVP  viewport.Model
-	showingVP  bool // user scrolled into history; render viewport instead of latest turn
+	chat      *bubbles.Chat
+	thought   *bubbles.Thought
+	petBubble *bubbles.PetBubble
+
+	// petRendered caches the pet bubble render so glamour isn't called on every tick.
+	// Invalidated when petTick changes or pet content changes.
+	petRendered    string
+	petRenderTick  int // last tick at which pet was rendered (updated every 3 ticks for animation)
+	petRenderWidth int // invalidate cache if width changes
+
+	system    []string
+	mainVP    viewport.Model // single scrollable viewport for all chat content
+	showingVP bool           // true while user is in scroll mode
+
+	todoBubble  *bubbles.TodoBubble
+	askBubble   *bubbles.AskBubble
+	toolPanel   *bubbles.ToolPanel
+	codeBubble  *bubbles.CodeBubble
+	fileTree    *bubbles.FileTreeBubble
+	stm32Status *bubbles.STM32StatusBubble
 
 	cmds  *commands.Registry
 	popup *cmdPopup
@@ -63,7 +72,7 @@ type Model struct {
 	input    textinput.Model
 	turn     <-chan agent.Event
 	thinking bool
-	tick     int // animation clock, incremented by tickMsg
+	tick     int
 
 	width  int
 	height int
@@ -76,12 +85,10 @@ func tickCmd() tea.Cmd {
 	return tea.Tick(80*time.Millisecond, func(time.Time) tea.Msg { return tickMsg{} })
 }
 
-// Options configures the root model.
 type Options struct {
-	Root    string
-	User    string
-	Version string
-	// Existing settings; if Loaded is false, onboarding runs.
+	Root     string
+	User     string
+	Version  string
 	Existing settings.Settings
 	Loaded   bool
 }
@@ -158,12 +165,10 @@ func (m *Model) Init() tea.Cmd {
 	return tea.Batch(textinput.Blink, tickCmd())
 }
 
-// SaveFunc persists settings to .agent_settings/settings.json.
 type SaveFunc func(s settings.Settings) error
 
 var saveHook SaveFunc
 
-// SetSaveHook lets main register a persistence callback.
 func SetSaveHook(f SaveFunc) { saveHook = f }
 
 func (m *Model) persist() {
@@ -171,11 +176,11 @@ func (m *Model) persist() {
 		return
 	}
 	_ = saveHook(settings.Settings{
-		Theme:    m.theme.Name,
-		Trusted:  m.trusted,
+		Theme:   m.theme.Name,
+		Trusted: m.trusted,
 		Provider: m.provider,
-		Pet:      m.pet,
-		PetName:  m.petName,
+		Pet:     m.pet,
+		PetName: m.petName,
 	})
 }
 
@@ -191,14 +196,18 @@ func (m *Model) enterChat() {
 	if m.petBubble == nil {
 		m.petBubble = bubbles.NewPetBubble(m.theme, pets.ByName(m.pet).Art, m.petName)
 	}
-	m.historyVP = viewport.New(m.width, m.viewportHeight())
+	m.mainVP = viewport.New(m.width, m.vpHeight())
+	m.toolPanel = bubbles.NewToolPanel(m.theme)
+	m.codeBubble = bubbles.NewCodeBubble(m.theme)
+	m.fileTree = bubbles.NewFileTreeBubble(m.theme)
+	m.stm32Status = bubbles.NewSTM32StatusBubble(m.theme)
 	m.input.Focus()
 }
 
-// viewportHeight is the height budget for the scrollback when the user
-// pages up into history. Leaves room for the input + status line.
-func (m *Model) viewportHeight() int {
-	h := m.height - 4
+// vpHeight is the usable height for the main scrollable viewport.
+// Reserves 2 lines: input + status bar.
+func (m *Model) vpHeight() int {
+	h := m.height - 2
 	if h < 5 {
 		h = 5
 	}
@@ -210,8 +219,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.input.Width = msg.Width - 6
-		m.historyVP.Width = msg.Width
-		m.historyVP.Height = m.viewportHeight()
+		m.mainVP.Width = msg.Width
+		m.mainVP.Height = m.vpHeight()
+		m.petRendered = "" // invalidate cache on resize
+		return m, nil
+
+	case tea.MouseMsg:
+		if m.state == stateChat {
+			return m.updateChatMouse(msg)
+		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -275,7 +291,6 @@ func (m *Model) updateOnboarding(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.popup = newCmdPopup(m.cmds)
 		m.persist()
 		m.enterWelcome()
-		return m, nil
 	}
 	return m, nil
 }
@@ -283,32 +298,32 @@ func (m *Model) updateOnboarding(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *Model) updateChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
-	// History scrollback: pgup/pgdn (and shift+up/down) navigate the
-	// scrollback viewport. The popup takes priority when visible so it
-	// can use up/down for selection.
+	// Ask bubble intercepts all input while waiting for an answer.
+	if m.askBubble != nil && !m.askBubble.Answered() {
+		return m.updateAsk(msg)
+	}
+
 	if !m.popup.Visible() {
 		switch key {
 		case "pgup", "shift+up":
-			m.openHistory()
-			m.historyVP.HalfPageUp()
+			m.showingVP = true
+			m.mainVP.HalfPageUp()
 			return m, nil
 		case "pgdown", "shift+down":
-			if m.showingVP {
-				m.historyVP.HalfPageDown()
-				if m.historyVP.AtBottom() {
-					m.showingVP = false
-				}
+			m.mainVP.HalfPageDown()
+			if m.mainVP.AtBottom() {
+				m.showingVP = false
 			}
 			return m, nil
 		case "esc":
 			if m.showingVP {
 				m.showingVP = false
+				m.mainVP.GotoBottom()
 				return m, nil
 			}
 		}
 	}
 
-	// Popup-aware keys take priority when the popup is open.
 	if m.popup.Visible() {
 		switch key {
 		case "up":
@@ -340,7 +355,6 @@ func (m *Model) updateChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.thinking {
 			return m, nil
 		}
-		// If popup has a selection and the input doesn't yet match it, accept it.
 		if sug, ok := m.popup.Selected(); ok {
 			if m.input.Value() != sug.Value {
 				m.input.SetValue(sug.Value)
@@ -374,24 +388,79 @@ func (m *Model) updateChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m *Model) updateAsk(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	ask := m.askBubble
+	key := msg.String()
+
+	if ask.OtherInput().Focused() {
+		switch key {
+		case "enter":
+			if ask.Confirm() {
+				return m.submitAskAnswer()
+			}
+		case "up", "esc":
+			ask.MoveUp()
+		default:
+			ti, c := ask.OtherInput().Update(msg)
+			*ask.OtherInput() = ti
+			return m, c
+		}
+		return m, nil
+	}
+
+	switch key {
+	case "up", "k":
+		ask.MoveUp()
+	case "down", "j":
+		ask.MoveDown()
+	case "enter", " ":
+		if ask.Confirm() {
+			return m.submitAskAnswer()
+		}
+	}
+	return m, nil
+}
+
+func (m *Model) submitAskAnswer() (tea.Model, tea.Cmd) {
+	ask := m.askBubble
+	answer := ask.Answer()
+	question := ask.Question()
+	m.askBubble = nil
+	m.input.Focus()
+	payload := "[Answer to: " + question + "]\n" + answer
+	m.turn = m.session.Send(m.ctx, payload)
+	m.thinking = true
+	return m, m.waitEvent()
+}
+
+func (m *Model) updateChatMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.MouseWheelUp:
+		m.showingVP = true
+		m.mainVP.LineUp(3)
+	case tea.MouseWheelDown:
+		m.mainVP.LineDown(3)
+		if m.mainVP.AtBottom() {
+			m.showingVP = false
+		}
+	}
+	return m, nil
+}
+
 func (m *Model) resetSession() {
 	m.session.Reset()
 	m.chat = bubbles.NewChat(m.theme)
 	m.thought = bubbles.NewThought(m.theme)
+	m.toolPanel = bubbles.NewToolPanel(m.theme)
+	m.codeBubble = bubbles.NewCodeBubble(m.theme)
+	m.fileTree = bubbles.NewFileTreeBubble(m.theme)
+	m.stm32Status = bubbles.NewSTM32StatusBubble(m.theme)
+	m.petRendered = ""
 	m.system = nil
 	m.err = nil
 	m.showingVP = false
-}
-
-// openHistory loads all turns into the viewport and shows it.
-func (m *Model) openHistory() {
-	hist := m.chat.RenderAll(m.width)
-	if hist == "" {
-		return
-	}
-	m.historyVP.SetContent(hist)
-	m.historyVP.GotoBottom()
-	m.showingVP = true
+	m.askBubble = nil
+	m.todoBubble = nil
 }
 
 func (m *Model) runCommand(input string) (quit bool) {
@@ -410,6 +479,19 @@ func (m *Model) runCommand(input string) (quit bool) {
 		}
 		if m.petBubble != nil {
 			m.petBubble.SetTheme(m.theme)
+			m.petRendered = ""
+		}
+		if m.toolPanel != nil {
+			m.toolPanel.SetTheme(m.theme)
+		}
+		if m.codeBubble != nil {
+			m.codeBubble.SetTheme(m.theme)
+		}
+		if m.fileTree != nil {
+			m.fileTree.SetTheme(m.theme)
+		}
+		if m.stm32Status != nil {
+			m.stm32Status.SetTheme(m.theme)
 		}
 	}
 	if res.NewPet != "" {
@@ -419,12 +501,14 @@ func (m *Model) runCommand(input string) (quit bool) {
 		}
 		if m.petBubble != nil {
 			m.petBubble.SetArt(pets.ByName(m.pet).Art)
+			m.petRendered = ""
 		}
 	}
 	if res.NewPetName != "" {
 		m.petName = res.NewPetName
 		if m.petBubble != nil {
 			m.petBubble.SetName(m.petName)
+			m.petRendered = ""
 		}
 	}
 	if res.NewTrusted != nil {
@@ -459,21 +543,116 @@ func (m *Model) route(ev agent.Event) {
 	switch e := ev.(type) {
 	case agent.ErrorEvent:
 		m.err = e.Err
+
 	case agent.TurnEndEvent:
-		// handled in Update
-	default:
-		// Tool start/result/artifact, line, user message, done — chat
-		// owns all of them so they can group into a single turn block.
+		if m.todoBubble != nil {
+			m.todoBubble.Handle(ev)
+		}
+
+	case agent.TodoEvent:
+		m.todoBubble = bubbles.NewTodoBubble(m.theme, e.Items)
+
+	case agent.AskEvent:
+		m.askBubble = bubbles.NewAskBubble(m.theme, e.Question, e.Options)
+		m.input.Blur()
+
+	case agent.ToolStartEvent:
+		m.toolPanel.Handle(ev)
+		m.chat.Handle(ev)
+		if m.todoBubble != nil {
+			m.todoBubble.Handle(ev)
+		}
+		switch e.Name {
+		case "stm32_compile":
+			if len(e.Args) > 0 {
+				if t, ok := e.Args[0].(string); ok {
+					m.stm32Status.SetTarget(t)
+				}
+			}
+			m.stm32Status.CompileStart()
+		case "stm32_emulate":
+			m.stm32Status.EmulateStart()
+		}
+
+	case agent.ToolResultEvent:
+		m.toolPanel.Handle(ev)
+		m.chat.Handle(ev)
+		m.routeToolResult(e)
+
+	case agent.ArtifactEvent:
+		m.toolPanel.Handle(ev)
+
+	case agent.UserMessageEvent:
 		m.chat.Handle(ev)
 		m.thought.Handle(ev)
+		m.toolPanel.Handle(ev)
+		m.codeBubble.Handle(ev)
+		m.fileTree.Handle(ev)
+		m.stm32Status.Handle(ev)
+		m.petRendered = "" // pet may change phase
+		m.showingVP = false
+		m.askBubble = nil
+		m.todoBubble = nil
+
+	default:
+		m.chat.Handle(ev)
+		m.thought.Handle(ev)
+		if m.todoBubble != nil {
+			m.todoBubble.Handle(ev)
+		}
 	}
+
 	if m.petBubble != nil {
 		m.petBubble.Handle(ev)
+		m.petRendered = "" // content changed, invalidate
 	}
-	// New content arrived: snap viewport back to the latest turn.
-	if _, isUser := ev.(agent.UserMessageEvent); isUser {
-		m.showingVP = false
+}
+
+func (m *Model) routeToolResult(e agent.ToolResultEvent) {
+	result := e.Result
+	failed := strings.HasPrefix(result, "ERROR:") ||
+		strings.HasPrefix(result, "COMPILE FAILED:") ||
+		strings.HasPrefix(result, "QEMU error:")
+
+	switch e.Name {
+	case "stm32_compile":
+		if failed {
+			m.stm32Status.CompileFail(result)
+		} else {
+			m.stm32Status.CompileOK(result)
+		}
+	case "stm32_emulate":
+		if failed {
+			m.stm32Status.EmulateFail(result)
+		} else {
+			m.stm32Status.EmulateOK(result)
+		}
+	case "stm32_write_file":
+		if !failed {
+			if path, content := m.extractWriteFileArgs(); path != "" {
+				m.codeBubble.Update(path, content)
+				m.fileTree.AddFile(path)
+			}
+		}
+	case "stm32_list_files":
+		for _, line := range strings.Split(result, "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" && !strings.HasPrefix(line, "ERROR") {
+				m.fileTree.AddFile(line)
+			}
+		}
 	}
+}
+
+func (m *Model) extractWriteFileArgs() (path, content string) {
+	args := m.toolPanel.LastCallArgs("stm32_write_file")
+	if len(args) >= 1 {
+		path, _ = args[0].(string)
+	}
+	if len(args) >= 2 {
+		content, _ = args[1].(string)
+	}
+	return
 }
 
 func (m *Model) View() string {
@@ -496,56 +675,98 @@ func (m *Model) chatView() string {
 	busyStyle := lipgloss.NewStyle().Foreground(t.WarnFg)
 	sysStyle := lipgloss.NewStyle().Foreground(t.Accent).Italic(true)
 
-	var parts []string
+	// Build all chat content into one string for the main viewport.
+	var content []string
 
-	if m.showingVP {
-		parts = append(parts, m.historyVP.View())
-		parts = append(parts, hintStyle.Render("— scrollback (esc/pgdn to return) —"))
-	} else {
-		if m.petBubble != nil {
-			parts = append(parts, m.petBubble.View(w, m.tick))
-		}
-		if latest := m.chat.RenderLatest(w); latest != "" {
-			parts = append(parts, latest)
-		}
-		if m.thought.HasContent() {
-			parts = append(parts, m.thought.View(w))
-		}
+	if m.petBubble != nil {
+		content = append(content, m.petView(w))
 	}
-
+	if latest := m.chat.RenderLatest(w); latest != "" {
+		content = append(content, latest)
+	}
+	if m.thought.HasContent() {
+		content = append(content, m.thought.View(w))
+	}
+	if m.todoBubble != nil {
+		content = append(content, m.todoBubble.View(w))
+	}
+	if m.toolPanel != nil && m.toolPanel.HasContent() {
+		content = append(content, m.toolPanel.View(w))
+	}
+	if m.stm32Status != nil && m.stm32Status.HasContent() {
+		content = append(content, m.stm32Status.View(w))
+	}
+	if m.codeBubble != nil && m.codeBubble.HasContent() {
+		content = append(content, m.codeBubble.View(w))
+	}
+	if m.fileTree != nil && m.fileTree.HasContent() {
+		content = append(content, m.fileTree.View(w))
+	}
+	if m.askBubble != nil {
+		content = append(content, m.askBubble.View(w))
+	}
 	for _, s := range m.system {
-		parts = append(parts, sysStyle.Render("» "+s))
+		content = append(content, sysStyle.Render("» "+s))
 	}
 	if m.err != nil {
-		parts = append(parts, errStyle.Render("error: "+m.err.Error()))
+		content = append(content, errStyle.Render("error: "+m.err.Error()))
 	}
+
+	// Feed built content into the viewport. If not in manual scroll mode,
+	// always snap to the bottom so new content is visible immediately.
+	vpContent := strings.Join(content, "\n")
+	m.mainVP.SetContent(vpContent)
+	if !m.showingVP {
+		m.mainVP.GotoBottom()
+	}
+
+	var rows []string
+	rows = append(rows, m.mainVP.View())
 
 	if m.popup.Visible() {
-		parts = append(parts, m.popup.View(m.theme, w))
+		rows = append(rows, m.popup.View(m.theme, w))
 	}
 
-	trustTag := "trusted"
-	if !m.trusted {
-		trustTag = "read-only"
+	// Bottom bar: input + status, or ask hint.
+	if m.askBubble != nil && !m.askBubble.Answered() {
+		rows = append(rows, hintStyle.Render("↑↓ navigate • enter select • ctrl+c quit"))
+	} else {
+		trustTag := "trusted"
+		if !m.trusted {
+			trustTag = "read-only"
+		}
+		status := "ctrl+c quit • ctrl+r reset • / commands • " + trustTag
+		if len(m.chat.Turns()) > 0 {
+			if m.showingVP {
+				status += " • esc to latest"
+			} else {
+				status += " • scroll to browse"
+			}
+		}
+		if m.thinking {
+			status = busyStyle.Render("● thinking…") + "  " + status
+		}
+		rows = append(rows, m.input.View(), hintStyle.Render(status))
 	}
-	scrollHint := "pgup history"
-	if len(m.chat.Turns()) == 0 {
-		scrollHint = ""
-	}
-	status := "ctrl+c quit • ctrl+r reset • / commands • " + trustTag
-	if scrollHint != "" {
-		status += " • " + scrollHint
-	}
-	if m.thinking {
-		status = busyStyle.Render("● thinking…") + "  " + status
-	}
-	parts = append(parts, m.input.View(), hintStyle.Render(status))
-	return strings.Join(parts, "\n")
+
+	return strings.Join(rows, "\n")
 }
 
-// buildCommands registers all slash commands. Closures capture the model
-// so each command can read or mutate state, but state changes flow back
-// through commands.Result so the model decides what to apply.
+// petView returns the cached pet bubble render, only re-rendering when the
+// animation frame or content has changed. This avoids calling glamour on
+// every 80ms tick.
+func (m *Model) petView(w int) string {
+	// Animation: pet updates every 3 ticks (~240ms). Content changes
+	// invalidate m.petRendered directly via route().
+	animTick := m.tick / 3
+	if m.petRendered == "" || animTick != m.petRenderTick || w != m.petRenderWidth {
+		m.petRendered = m.petBubble.View(w, m.tick)
+		m.petRenderTick = animTick
+		m.petRenderWidth = w
+	}
+	return m.petRendered
+}
+
 func (m *Model) buildCommands() *commands.Registry {
 	r := commands.New()
 
@@ -602,8 +823,7 @@ func (m *Model) buildCommands() *commands.Registry {
 			if len(args) == 0 {
 				return commands.Result{Message: "current pet name: " + m.petName + " (usage: /rename <name>)"}
 			}
-			newName := strings.Join(args, " ")
-			return commands.Result{NewPetName: newName, Message: "pet renamed → " + newName}
+			return commands.Result{NewPetName: strings.Join(args, " "), Message: "pet renamed → " + strings.Join(args, " ")}
 		},
 	})
 
@@ -612,16 +832,12 @@ func (m *Model) buildCommands() *commands.Registry {
 	r.Register(&commands.Command{
 		Name:        "trust",
 		Description: "trust this directory (allow tool use)",
-		Run: func(args []string) commands.Result {
-			return commands.Result{NewTrusted: &tt, Message: "directory trusted"}
-		},
+		Run:         func(args []string) commands.Result { return commands.Result{NewTrusted: &tt, Message: "directory trusted"} },
 	})
 	r.Register(&commands.Command{
 		Name:        "untrust",
 		Description: "revoke trust for this directory",
-		Run: func(args []string) commands.Result {
-			return commands.Result{NewTrusted: &ff, Message: "directory untrusted (read-only)"}
-		},
+		Run:         func(args []string) commands.Result { return commands.Result{NewTrusted: &ff, Message: "directory untrusted (read-only)"} },
 	})
 
 	providers := []string{
@@ -650,25 +866,18 @@ func (m *Model) buildCommands() *commands.Registry {
 	r.Register(&commands.Command{
 		Name:        "reset",
 		Description: "reset the agent session",
-		Run: func(args []string) commands.Result {
-			return commands.Result{ResetSession: true, Message: "session reset"}
-		},
+		Run:         func(args []string) commands.Result { return commands.Result{ResetSession: true, Message: "session reset"} },
 	})
 	r.Register(&commands.Command{
 		Name:        "clear",
 		Description: "clear visible bubbles (keeps session)",
-		Run: func(args []string) commands.Result {
-			return commands.Result{ClearVisual: true}
-		},
+		Run:         func(args []string) commands.Result { return commands.Result{ClearVisual: true} },
 	})
 	r.Register(&commands.Command{
 		Name:        "quit",
 		Description: "exit hardcore-ai",
-		Run: func(args []string) commands.Result {
-			return commands.Result{Quit: true}
-		},
+		Run:         func(args []string) commands.Result { return commands.Result{Quit: true} },
 	})
-
 	r.Register(&commands.Command{
 		Name:        "help",
 		Description: "list available commands",

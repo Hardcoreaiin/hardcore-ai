@@ -53,15 +53,15 @@ func (l *Loop) Run(ctx context.Context, userPrompt string) <-chan Event {
 				return false
 			}
 		}
-		l.runTurn(ctx, &msgs, emit)
+		_ = l.runTurn(ctx, &msgs, emit)
 	}()
 	return out
 }
 
 // runTurn executes the THINK/CALL state machine against the given message
-// history, appending assistant/tool turns to msgs in place. Returns when
-// the model emits a final answer, hits the step cap, or errors out.
-func (l *Loop) runTurn(ctx context.Context, msgs *[]llm.Message, emit func(Event) bool) {
+// history, appending assistant/tool turns to msgs in place. Returns true if
+// it already emitted TurnEndEvent (ASK suspension), false otherwise.
+func (l *Loop) runTurn(ctx context.Context, msgs *[]llm.Message, emit func(Event) bool) (emittedEnd bool) {
 	for step := 0; step < l.cfg.MaxToolSteps; step++ {
 		lines, err := l.llm.Stream(ctx, *msgs)
 		if err != nil {
@@ -71,6 +71,7 @@ func (l *Loop) runTurn(ctx context.Context, msgs *[]llm.Message, emit func(Event
 
 		var rawBuf strings.Builder
 		var pendingCall *ParsedLine
+		var pendingAsk *AskEvent
 
 		for line := range lines {
 			if line.Done {
@@ -92,19 +93,59 @@ func (l *Loop) runTurn(ctx context.Context, msgs *[]llm.Message, emit func(Event
 				pendingCall = &p
 				// Intentionally don't emit a LineEvent: CALL syntax is
 				// internal and must never reach the chat view.
+			case LineTodo:
+				items := make([]string, len(pl.Tokens))
+				for i, t := range pl.Tokens {
+					items[i], _ = t.(string)
+				}
+				if !emit(TodoEvent{Items: items}) {
+					return
+				}
+			case LineAsk:
+				parts := make([]string, len(pl.Tokens))
+				for i, t := range pl.Tokens {
+					parts[i], _ = t.(string)
+				}
+				question := ""
+				options := parts
+				if len(parts) > 0 {
+					question = parts[0]
+					options = parts[1:]
+				}
+				ev := AskEvent{Question: question, Options: options}
+				pendingAsk = &ev
+				// Stop processing this stream immediately — the turn is
+				// suspended until the user answers. Drain the channel so
+				// the HTTP goroutine can exit cleanly.
+				for range lines {
+				}
+				break
 			default:
 				if !emit(LineEvent{Text: line.Text}) {
 					return
 				}
 			}
+			if pendingAsk != nil {
+				break
+			}
 		}
 
 		assistantRaw := rawBuf.String()
 
+		// ASK: suspend the turn. Append the partial assistant message so
+		// history is intact, emit the event, then return — the next call
+		// to session.Send (with the user's answer) continues the work.
+		if pendingAsk != nil {
+			*msgs = append(*msgs, llm.Message{Role: llm.RoleAssistant, Content: assistantRaw})
+			emit(*pendingAsk)
+			emit(TurnEndEvent{})
+			return true
+		}
+
 		if pendingCall == nil {
 			*msgs = append(*msgs, llm.Message{Role: llm.RoleAssistant, Content: assistantRaw})
 			emit(DoneEvent{})
-			return
+			return false
 		}
 
 		pc := *pendingCall
@@ -152,6 +193,7 @@ func (l *Loop) runTurn(ctx context.Context, msgs *[]llm.Message, emit func(Event
 	}
 
 	emit(StepLimitEvent{Limit: l.cfg.MaxToolSteps})
+	return false
 }
 
 // Session is a multi-turn conversation. Message history accumulates across
@@ -186,8 +228,9 @@ func (s *Session) Send(ctx context.Context, userPrompt string) <-chan Event {
 			}
 		}
 		emit(UserMessageEvent{Text: userPrompt})
-		s.loop.runTurn(ctx, &s.msgs, emit)
-		emit(TurnEndEvent{})
+		if alreadyEnded := s.loop.runTurn(ctx, &s.msgs, emit); !alreadyEnded {
+			emit(TurnEndEvent{})
+		}
 	}()
 	return out
 }
