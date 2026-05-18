@@ -22,11 +22,22 @@ type StepLimitEvent struct{ Limit int }
 type DoneEvent struct{}
 type ErrorEvent struct{ Err error }
 
-func (LineEvent) isEvent()       {}
-func (ThinkEvent) isEvent()      {}
-func (ToolStartEvent) isEvent()  {}
-func (ToolResultEvent) isEvent() {}
-func (ArtifactEvent) isEvent()   {}
-func (StepLimitEvent) isEvent()  {}
-func (DoneEvent) isEvent()       {}
-func (ErrorEvent) isEvent()      {}
+// TurnEndEvent is emitted once per call to Session.Send after the model
+// finishes (whether via Done, StepLimit, or Error). The TUI uses it to
+// know when input should be re-enabled.
+type TurnEndEvent struct{}
+
+// UserMessageEvent is emitted at the start of a turn so subscribers can
+// render the user's own input in chat without coordinating with main.
+type UserMessageEvent struct{ Text string }
+
+func (LineEvent) isEvent()        {}
+func (ThinkEvent) isEvent()       {}
+func (ToolStartEvent) isEvent()   {}
+func (ToolResultEvent) isEvent()  {}
+func (ArtifactEvent) isEvent()    {}
+func (StepLimitEvent) isEvent()   {}
+func (DoneEvent) isEvent()        {}
+func (ErrorEvent) isEvent()       {}
+func (TurnEndEvent) isEvent()     {}
+func (UserMessageEvent) isEvent() {}

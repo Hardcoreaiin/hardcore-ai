@@ -12,12 +12,19 @@ import (
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/config"
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/llm"
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/tools"
+	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/tui"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func main() {
-	prompt := "What is 17 * 23, and then reverse the result as a string?"
-	if len(os.Args) > 1 {
-		prompt = strings.Join(os.Args[1:], " ")
+	headless := false
+	var keep []string
+	for _, a := range os.Args[1:] {
+		if a == "--headless" {
+			headless = true
+			continue
+		}
+		keep = append(keep, a)
 	}
 
 	reg := tools.NewRegistry()
@@ -31,10 +38,28 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	fmt.Println("─── hardcore-ai (phase 1, headless) ───")
-	fmt.Println("prompt:", prompt)
-	fmt.Println()
+	if headless {
+		prompt := strings.Join(keep, " ")
+		if prompt == "" {
+			fmt.Fprintln(os.Stderr, "--headless requires a prompt argument")
+			os.Exit(2)
+		}
+		runHeadless(ctx, loop, prompt)
+		return
+	}
 
+	session := loop.NewSession()
+	model := tui.New(ctx, session)
+	p := tea.NewProgram(model, tea.WithAltScreen())
+	if _, err := p.Run(); err != nil {
+		fmt.Fprintln(os.Stderr, "tui error:", err)
+		os.Exit(1)
+	}
+}
+
+func runHeadless(ctx context.Context, loop *agent.Loop, prompt string) {
+	fmt.Println("─── hardcore-ai (headless) ───")
+	fmt.Println("prompt:", prompt)
 	for ev := range loop.Run(ctx, prompt) {
 		switch e := ev.(type) {
 		case agent.ThinkEvent:
@@ -54,6 +79,7 @@ func main() {
 			os.Exit(1)
 		case agent.DoneEvent:
 			fmt.Println("\n─── done ───")
+			return
 		}
 	}
 }
@@ -61,18 +87,9 @@ func main() {
 func buildClient(cfg config.LLMConfig) llm.Client {
 	switch cfg.Provider {
 	case config.ProviderGemini:
-		return llm.NewGemini(llm.GeminiConfig{
-			URL:    cfg.URL,
-			Model:  cfg.Model,
-			APIKey: cfg.APIKey,
-		})
+		return llm.NewGemini(llm.GeminiConfig{URL: cfg.URL, Model: cfg.Model, APIKey: cfg.APIKey})
 	default:
-		// llamacpp and openrouter both speak the OpenAI chat-completions protocol.
-		return llm.NewOpenAI(llm.OpenAIConfig{
-			URL:    cfg.URL,
-			Model:  cfg.Model,
-			APIKey: cfg.APIKey,
-		})
+		return llm.NewOpenAI(llm.OpenAIConfig{URL: cfg.URL, Model: cfg.Model, APIKey: cfg.APIKey})
 	}
 }
 
