@@ -12,12 +12,13 @@ import (
 	"syscall"
 
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/agent"
+	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/bus"
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/config"
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/llm"
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/settings"
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/toolchain"
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/tools"
-	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/tools/stm32"
+	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/tools/embedded"
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/tui"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -36,17 +37,26 @@ func main() {
 	}
 
 	reg := tools.NewRegistry()
-	tools.RegisterCalculator(reg)
-	tools.RegisterStringUtils(reg)
 
 	tcMgr, err := toolchain.DefaultManager()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "toolchain manager init:", err)
 		os.Exit(1)
 	}
-	stm32.RegisterWorkspace(reg)
-	stm32.RegisterCompile(reg, tcMgr)
-	stm32.RegisterEmulate(reg, tcMgr)
+	appBus := bus.New(128)
+	defer appBus.Close()
+	tcMgr.OnEvent = func(ev toolchain.Event) {
+		appBus.Publish(ev)
+	}
+	embedded.RegisterWorkspaceInit(reg)
+	embedded.RegisterWorkspaceStatus(reg)
+	embedded.RegisterFileWrite(reg)
+	embedded.RegisterFileRead(reg)
+	embedded.RegisterFileList(reg)
+	embedded.RegisterFileSearch(reg)
+	embedded.RegisterBuild(reg, tcMgr)
+	embedded.RegisterFlash(reg)
+	embedded.RegisterEmulate(reg, tcMgr)
 
 	cfg := config.Load()
 	client := buildClient(cfg)
@@ -87,10 +97,11 @@ func main() {
 		Root:     cwd,
 		User:     currentUser(),
 		Version:  version,
+		Events:   appBus.Subscribe(),
 		Existing: existing,
 		Loaded:   loaded,
 	})
-	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(model, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "tui error:", err)
 		os.Exit(1)

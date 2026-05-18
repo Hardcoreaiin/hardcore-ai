@@ -9,22 +9,33 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// FileTreeBubble tracks all files written during a session and renders them
-// as a simple directory tree. Updated by the TUI on stm32_write_file results.
+// FileTreeBubble tracks all files written during a session.
+// Persists across turns — only reset explicitly via Reset().
 type FileTreeBubble struct {
-	files []string // relative paths, e.g. "main.c", "src/led.c"
-	theme *theme.Theme
+	project string   // project name shown as root
+	files   []string // relative paths
+	theme   *theme.Theme
 }
 
 func NewFileTreeBubble(t *theme.Theme) *FileTreeBubble {
-	return &FileTreeBubble{theme: t}
+	return &FileTreeBubble{theme: t, project: "workspace"}
 }
 
+func (b *FileTreeBubble) Title() string           { return "workspace" }
 func (b *FileTreeBubble) SetTheme(t *theme.Theme) { b.theme = t }
-func (b *FileTreeBubble) HasContent() bool         { return len(b.files) > 0 }
+func (b *FileTreeBubble) HasContent() bool        { return b.project != "" || len(b.files) > 0 }
 
-// AddFile records a new file path (idempotent).
+func (b *FileTreeBubble) SetProject(name string) {
+	if name != "" {
+		b.project = name
+	}
+}
+
 func (b *FileTreeBubble) AddFile(rel string) {
+	rel = strings.TrimSpace(rel)
+	if rel == "" {
+		return
+	}
 	for _, f := range b.files {
 		if f == rel {
 			return
@@ -34,21 +45,20 @@ func (b *FileTreeBubble) AddFile(rel string) {
 	sort.Strings(b.files)
 }
 
-func (b *FileTreeBubble) Handle(ev agent.Event) bool {
-	if _, ok := ev.(agent.UserMessageEvent); ok {
-		b.files = nil
-		return true
-	}
-	return false
+func (b *FileTreeBubble) Handle(_ agent.Event) bool { return false }
+
+func (b *FileTreeBubble) Reset() {
+	b.files = nil
+	b.project = "workspace"
 }
 
 func (b *FileTreeBubble) View(width int) string {
 	t := b.theme
 	titleStyle := lipgloss.NewStyle().Foreground(t.Accent).Bold(true)
+	rootStyle := lipgloss.NewStyle().Foreground(t.UserFg).Bold(true)
 	dirStyle := lipgloss.NewStyle().Foreground(t.UserFg)
 	fileStyle := lipgloss.NewStyle().Foreground(t.Text)
 
-	// Build a simple tree: group by first path component.
 	type entry struct {
 		dir  string
 		file string
@@ -65,7 +75,7 @@ func (b *FileTreeBubble) View(width int) string {
 
 	var sb strings.Builder
 	sb.WriteString(titleStyle.Render("workspace") + "\n")
-	sb.WriteString(dirStyle.Render("workspace/") + "\n")
+	sb.WriteString(rootStyle.Render(b.project+"/") + "\n")
 
 	seenDirs := map[string]bool{}
 	for _, e := range entries {

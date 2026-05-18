@@ -6,6 +6,10 @@ type Event interface{ isEvent() }
 
 type LineEvent struct{ Text string }
 type ThinkEvent struct{ Text string }
+
+// TokenEvent is emitted for every raw token as it arrives from the LLM,
+// before line-buffering. Used by the stream ticker and pet animation.
+type TokenEvent struct{ Text string }
 type ToolStartEvent struct {
 	Name string
 	Args []any
@@ -50,8 +54,16 @@ type AskEvent struct {
 	Options  []string
 }
 
+// CodeFenceEvent is emitted when the model outputs a fenced code block.
+// The TUI renders it in the code bubble with language-appropriate styling.
+type CodeFenceEvent struct {
+	Lang    string // e.g. "c", "python", "go" — empty string means unknown
+	Content string // the code inside the fence, trimmed
+}
+
 func (LineEvent) isEvent()            {}
 func (ThinkEvent) isEvent()           {}
+func (TokenEvent) isEvent()           {}
 func (ToolStartEvent) isEvent()       {}
 func (ToolResultEvent) isEvent()      {}
 func (ArtifactEvent) isEvent()        {}
@@ -63,3 +75,4 @@ func (UserMessageEvent) isEvent()     {}
 func (TodoEvent) isEvent()            {}
 func (AskEvent) isEvent()             {}
 func (ToolCallBubbleEvent) isEvent()  {}
+func (CodeFenceEvent) isEvent()       {}

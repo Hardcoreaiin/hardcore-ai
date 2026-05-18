@@ -135,6 +135,13 @@ func (c *OpenAIClient) Stream(ctx context.Context, msgs []Message) (<-chan Line,
 				continue
 			}
 
+			// Emit the raw token immediately so the TUI can show it.
+			select {
+			case out <- Line{Token: token}:
+			case <-ctx.Done():
+				return
+			}
+
 			for {
 				idx := strings.IndexByte(token, '\n')
 				if idx < 0 {

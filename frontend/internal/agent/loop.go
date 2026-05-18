@@ -77,6 +77,11 @@ func (l *Loop) runTurn(ctx context.Context, msgs *[]llm.Message, emit func(Event
 			if line.Done {
 				break
 			}
+			// Raw token (sub-line chunk) — emit for the stream ticker, skip parsing.
+			if line.Token != "" && line.Text == "" {
+				emit(TokenEvent{Text: line.Token})
+				continue
+			}
 			if rawBuf.Len() > 0 {
 				rawBuf.WriteByte('\n')
 			}
@@ -142,7 +147,27 @@ func (l *Loop) runTurn(ctx context.Context, msgs *[]llm.Message, emit func(Event
 			return true
 		}
 
+		// Scan full buffer for code fences (``` ... ```) and emit them.
+		emitCodeFences(assistantRaw, emit)
+
+		// If per-line parsing missed the CALL (e.g. multi-line argument like
+		// file_write content), scan the full buffer now.
 		if pendingCall == nil {
+			if pl := ParseFullText(assistantRaw); pl.Kind == LineCall {
+				pendingCall = &pl
+			}
+		}
+
+		if pendingCall == nil {
+			// If the model only emitted a TODO (plan) with no tool call, prod it
+			// to start executing instead of stopping.
+			if strings.Contains(strings.ToUpper(assistantRaw), "TODO:") {
+				*msgs = append(*msgs,
+					llm.Message{Role: llm.RoleAssistant, Content: assistantRaw},
+					llm.Message{Role: llm.RoleUser, Content: "Good plan. Now execute it — start with the first step immediately using a CALL."},
+				)
+				continue
+			}
 			*msgs = append(*msgs, llm.Message{Role: llm.RoleAssistant, Content: assistantRaw})
 			emit(DoneEvent{})
 			return false
@@ -238,6 +263,34 @@ func (s *Session) Send(ctx context.Context, userPrompt string) <-chan Event {
 // Reset clears all history except the system prompt.
 func (s *Session) Reset() {
 	s.msgs = s.msgs[:1]
+}
+
+// emitCodeFences scans text for ``` fenced code blocks and emits a
+// CodeFenceEvent for each one found.
+func emitCodeFences(text string, emit func(Event) bool) {
+	for {
+		start := strings.Index(text, "```")
+		if start == -1 {
+			return
+		}
+		rest := text[start+3:]
+		// Extract optional language identifier (up to newline).
+		nl := strings.IndexByte(rest, '\n')
+		if nl == -1 {
+			return
+		}
+		lang := strings.TrimSpace(rest[:nl])
+		body := rest[nl+1:]
+		end := strings.Index(body, "```")
+		if end == -1 {
+			return
+		}
+		content := strings.TrimSpace(body[:end])
+		if content != "" {
+			emit(CodeFenceEvent{Lang: lang, Content: content})
+		}
+		text = body[end+3:]
+	}
 }
 
 // SwapClient replaces the underlying LLM client for future turns.

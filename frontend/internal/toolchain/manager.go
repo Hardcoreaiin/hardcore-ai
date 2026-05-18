@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 )
 
 // Manager handles downloading, extracting, and locating xpack toolchain binaries.
@@ -22,6 +23,23 @@ import (
 type Manager struct {
 	BaseDir    string
 	OnProgress func(tool Tool, downloaded, total int64)
+	OnEvent    func(Event)
+
+	mu      sync.Mutex
+	pending map[Tool]*installState
+}
+
+type Event struct {
+	Tool       Tool
+	Stage      string
+	Downloaded int64
+	Total      int64
+	Err        error
+}
+
+type installState struct {
+	done chan struct{}
+	err  error
 }
 
 type manifest struct {
@@ -35,7 +53,40 @@ func DefaultManager() (*Manager, error) {
 	}
 	return &Manager{
 		BaseDir: filepath.Join(home, ".hardcoreai", "toolchain"),
+		pending: make(map[Tool]*installState),
 	}, nil
+}
+
+// EnsureAsync starts a background download of tool if not installed.
+// Returns (true, nil) when already installed.
+// Returns (false, nil) when download is in progress — caller should retry later.
+// Returns (false, err) if the download failed.
+func (m *Manager) EnsureAsync(t Tool) (ready bool, err error) {
+	if _, err := m.installedDir(t); err == nil {
+		return true, nil
+	}
+
+	m.mu.Lock()
+	st := m.pending[t]
+	if st == nil {
+		st = &installState{done: make(chan struct{})}
+		m.pending[t] = st
+		go func() {
+			st.err = m.Ensure(context.Background(), t)
+			close(st.done)
+			m.mu.Lock()
+			delete(m.pending, t)
+			m.mu.Unlock()
+		}()
+	}
+	m.mu.Unlock()
+
+	select {
+	case <-st.done:
+		return st.err == nil, st.err
+	default:
+		return false, nil
+	}
 }
 
 // BinPath returns the absolute path to a named binary inside the given tool's
@@ -58,29 +109,42 @@ func (m *Manager) BinPath(t Tool, binary string) (string, error) {
 // Ensure downloads and extracts the tool if not already present.
 func (m *Manager) Ensure(ctx context.Context, t Tool) error {
 	if _, err := m.installedDir(t); err == nil {
+		m.emit(Event{Tool: t, Stage: "ready"})
 		return nil // already installed
 	}
 
 	rel, err := resolveRelease(t)
 	if err != nil {
+		m.emit(Event{Tool: t, Stage: "error", Err: err})
 		return err
 	}
 
 	if err := os.MkdirAll(m.BaseDir, 0o755); err != nil {
-		return fmt.Errorf("create toolchain dir: %w", err)
+		err = fmt.Errorf("create toolchain dir: %w", err)
+		m.emit(Event{Tool: t, Stage: "error", Err: err})
+		return err
 	}
 
 	archivePath := filepath.Join(m.BaseDir, rel.filename+rel.ext)
 	if err := m.download(ctx, t, rel, archivePath); err != nil {
+		m.emit(Event{Tool: t, Stage: "error", Err: err})
 		return err
 	}
 	defer os.Remove(archivePath)
 
+	m.emit(Event{Tool: t, Stage: "extract"})
 	if err := m.extract(archivePath, m.BaseDir, rel.ext); err != nil {
-		return fmt.Errorf("extract %s: %w", archivePath, err)
+		err = fmt.Errorf("extract %s: %w", archivePath, err)
+		m.emit(Event{Tool: t, Stage: "error", Err: err})
+		return err
 	}
 
-	return m.saveManifest(t, rel.filename)
+	if err := m.saveManifest(t, rel.filename); err != nil {
+		m.emit(Event{Tool: t, Stage: "error", Err: err})
+		return err
+	}
+	m.emit(Event{Tool: t, Stage: "ready"})
+	return nil
 }
 
 func (m *Manager) download(ctx context.Context, t Tool, rel release, dest string) error {
@@ -100,6 +164,9 @@ func (m *Manager) download(ctx context.Context, t Tool, rel release, dest string
 		return fmt.Errorf("download %s: HTTP %d", url, resp.StatusCode)
 	}
 
+	total := resp.ContentLength
+	m.emit(Event{Tool: t, Stage: "download", Downloaded: 0, Total: total})
+
 	// Fetch .sha checksum file for verification
 	shaURL := url + ".sha"
 	expectedSHA, _ := m.fetchSHA(ctx, shaURL)
@@ -112,7 +179,6 @@ func (m *Manager) download(ctx context.Context, t Tool, rel release, dest string
 
 	h := sha256.New()
 	var downloaded int64
-	total := resp.ContentLength
 	buf := make([]byte, 32*1024)
 
 	for {
@@ -131,6 +197,7 @@ func (m *Manager) download(ctx context.Context, t Tool, rel release, dest string
 			if m.OnProgress != nil {
 				m.OnProgress(t, downloaded, total)
 			}
+			m.emit(Event{Tool: t, Stage: "download", Downloaded: downloaded, Total: total})
 		}
 		if readErr == io.EOF {
 			break
@@ -148,6 +215,12 @@ func (m *Manager) download(ctx context.Context, t Tool, rel release, dest string
 	}
 
 	return nil
+}
+
+func (m *Manager) emit(ev Event) {
+	if m.OnEvent != nil {
+		m.OnEvent(ev)
+	}
 }
 
 func (m *Manager) fetchSHA(ctx context.Context, url string) (string, error) {

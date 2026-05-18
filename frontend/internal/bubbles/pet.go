@@ -13,13 +13,14 @@ import (
 // During a turn it streams think tokens live, then shows the final answer.
 // Pass the current tick counter from a time.Ticker for animations.
 type PetBubble struct {
-	art      string
-	name     string
-	msg      string
-	thinking []string
-	answer   []string
-	phase    petPhase
-	theme    *theme.Theme
+	art        string
+	name       string
+	msg        string
+	thinking   []string
+	answer     []string
+	liveTokens strings.Builder // raw tokens accumulating before a full line
+	phase      petPhase
+	theme      *theme.Theme
 }
 
 type petPhase int
@@ -29,9 +30,6 @@ const (
 	phaseThinking
 	phaseAnswering
 )
-
-// spinnerFrames is used during thinking.
-var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 // cursorFrames blinks during answering.
 var cursorFrames = []string{"▌", " "}
@@ -47,8 +45,8 @@ func NewPetBubble(t *theme.Theme, art, name string) *PetBubble {
 }
 
 func (p *PetBubble) SetTheme(t *theme.Theme) { p.theme = t }
-func (p *PetBubble) SetArt(art string)        { p.art = art }
-func (p *PetBubble) SetName(name string)      { p.name = name }
+func (p *PetBubble) SetArt(art string)       { p.art = art }
+func (p *PetBubble) SetName(name string)     { p.name = name }
 
 func (p *PetBubble) Handle(ev agent.Event) {
 	switch e := ev.(type) {
@@ -56,29 +54,50 @@ func (p *PetBubble) Handle(ev agent.Event) {
 		_ = e
 		p.thinking = nil
 		p.answer = nil
+		p.liveTokens.Reset()
 		p.phase = phaseThinking
 		p.msg = ""
-	case agent.ThinkEvent:
+	case agent.TokenEvent:
+		// Stream raw tokens into the pet live — shows every character as it arrives.
+		// Strip newlines so the rolling display stays on one conceptual line.
+		tok := strings.Map(func(r rune) rune {
+			if r == '\n' || r == '\r' {
+				return ' '
+			}
+			return r
+		}, e.Text)
+		p.liveTokens.WriteString(tok)
+		// Keep a bounded buffer — last 300 chars is plenty for one speech bubble.
+		if p.liveTokens.Len() > 300 {
+			s := p.liveTokens.String()
+			p.liveTokens.Reset()
+			p.liveTokens.WriteString(s[len(s)-300:])
+		}
 		if p.phase == phaseThinking {
+			p.phase = phaseAnswering
+		}
+	case agent.ThinkEvent:
+		if p.phase == phaseThinking || p.phase == phaseAnswering {
 			p.thinking = append(p.thinking, StripLatex(e.Text))
 		}
 	case agent.LineEvent:
-		p.phase = phaseAnswering
-		p.thinking = nil
 		line := strings.TrimSpace(StripLatex(e.Text))
 		if line != "" {
 			p.answer = append(p.answer, line)
 		}
 	case agent.ToolStartEvent:
-		p.phase = phaseAnswering
+		p.liveTokens.Reset()
 		p.thinking = nil
 		p.answer = nil
+		p.phase = phaseAnswering
 		p.msg = "running " + e.Name + "…"
 	case agent.ToolResultEvent:
+		p.liveTokens.Reset()
 		p.msg = "done " + e.Name + "."
 	case agent.TurnEndEvent:
 		p.phase = phaseIdle
 		p.thinking = nil
+		p.liveTokens.Reset()
 		if len(p.answer) == 0 {
 			p.msg = "ready."
 		}
@@ -86,6 +105,7 @@ func (p *PetBubble) Handle(ev agent.Event) {
 		p.phase = phaseIdle
 		p.thinking = nil
 		p.answer = nil
+		p.liveTokens.Reset()
 		p.msg = "something went wrong."
 	}
 }
@@ -97,7 +117,6 @@ func (p *PetBubble) View(width, tick int) string {
 	nameStyle := lipgloss.NewStyle().Foreground(t.Muted).Italic(true)
 	thinkStyle := lipgloss.NewStyle().Foreground(t.Muted).Italic(true)
 	idleStyle := lipgloss.NewStyle().Foreground(t.Muted).Italic(true)
-	spinStyle := lipgloss.NewStyle().Foreground(t.Accent).Bold(true)
 
 	// Build pet column: art + name
 	artLines := strings.Split(p.art, "\n")
@@ -124,31 +143,24 @@ func (p *PetBubble) View(width, tick int) string {
 	var speechLines []string
 	switch p.phase {
 	case phaseThinking:
-		spinner := spinnerFrames[tick%len(spinnerFrames)]
-		if len(p.thinking) == 0 {
-			speechLines = append(speechLines, spinStyle.Render(spinner)+" "+thinkStyle.Render("thinking…"))
-		} else {
-			// Show last think sentence, word-wrapped
-			last := strings.TrimSpace(p.thinking[len(p.thinking)-1])
-			wrapped := wordWrap(last, speechWidth-2)
-			speechLines = append(speechLines, spinStyle.Render(spinner)+" "+thinkStyle.Render(wrapped[0]))
-			for _, wl := range wrapped[1:] {
-				speechLines = append(speechLines, "  "+thinkStyle.Render(wl))
-			}
-		}
+		cursor := cursorFrames[(tick/3)%len(cursorFrames)]
+		speechLines = append(speechLines,
+			thinkStyle.Render("waiting for tokens")+lipgloss.NewStyle().Foreground(t.Accent).Render(cursor),
+		)
 
 	case phaseAnswering:
-		if len(p.answer) > 0 {
-			cursor := cursorFrames[(tick/3)%len(cursorFrames)]
-			rendered := p.renderMarkdown(strings.Join(p.answer, "\n"), speechWidth, t)
-			mdLines := strings.Split(rendered, "\n")
-			for i, wl := range mdLines {
-				if i == len(mdLines)-1 {
-					speechLines = append(speechLines, wl+lipgloss.NewStyle().Foreground(t.Accent).Render(cursor))
-				} else {
-					speechLines = append(speechLines, wl)
-				}
+		cursor := cursorFrames[(tick/3)%len(cursorFrames)]
+		live := p.liveTokens.String()
+		if live != "" {
+			// Show a rolling window of the last speechWidth chars of live tokens.
+			runes := []rune(live)
+			if len(runes) > speechWidth-2 {
+				runes = runes[len(runes)-(speechWidth-2):]
 			}
+			display := string(runes)
+			speechLines = append(speechLines,
+				thinkStyle.Render(display)+lipgloss.NewStyle().Foreground(t.Accent).Render(cursor),
+			)
 		} else {
 			speechLines = append(speechLines, idleStyle.Render(p.msg))
 		}

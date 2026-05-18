@@ -14,6 +14,7 @@ import (
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/pets"
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/settings"
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/theme"
+	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/toolchain"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -49,30 +50,31 @@ type Model struct {
 	thought   *bubbles.Thought
 	petBubble *bubbles.PetBubble
 
-	// petRendered caches the pet bubble render so glamour isn't called on every tick.
-	// Invalidated when petTick changes or pet content changes.
 	petRendered    string
-	petRenderTick  int // last tick at which pet was rendered (updated every 3 ticks for animation)
-	petRenderWidth int // invalidate cache if width changes
+	petRenderTick  int
+	petRenderWidth int
 
 	system    []string
-	mainVP    viewport.Model // single scrollable viewport for all chat content
-	showingVP bool           // true while user is in scroll mode
+	mainVP    viewport.Model
+	showingVP bool
 
-	todoBubble  *bubbles.TodoBubble
-	askBubble   *bubbles.AskBubble
-	toolPanel   *bubbles.ToolPanel
-	codeBubble  *bubbles.CodeBubble
-	fileTree    *bubbles.FileTreeBubble
-	stm32Status *bubbles.STM32StatusBubble
+	todoBubble *bubbles.TodoBubble
+	askBubble  *bubbles.AskBubble
+	toolPanel  *bubbles.ToolPanel
+	masonry    *MasonryManager
 
 	cmds  *commands.Registry
 	popup *cmdPopup
 
-	input    textinput.Model
-	turn     <-chan agent.Event
-	thinking bool
-	tick     int
+	input     textinput.Model
+	turn      <-chan agent.Event
+	appEvents <-chan any
+	thinking  bool
+	tick      int
+
+	// live token stream ticker
+	streamTicker string // latest token text, trimmed to one line
+	streamTokens int    // total tokens seen this turn
 
 	width  int
 	height int
@@ -89,6 +91,7 @@ type Options struct {
 	Root     string
 	User     string
 	Version  string
+	Events   <-chan any
 	Existing settings.Settings
 	Loaded   bool
 }
@@ -100,14 +103,15 @@ func New(ctx context.Context, session *agent.Session, opts Options) *Model {
 	ti.CharLimit = 4000
 
 	m := &Model{
-		ctx:     ctx,
-		session: session,
-		root:    opts.Root,
-		user:    opts.User,
-		version: opts.Version,
-		input:   ti,
-		width:   80,
-		height:  24,
+		ctx:       ctx,
+		session:   session,
+		root:      opts.Root,
+		user:      opts.User,
+		version:   opts.Version,
+		appEvents: opts.Events,
+		input:     ti,
+		width:     80,
+		height:    24,
 	}
 
 	if opts.Loaded {
@@ -142,7 +146,9 @@ func New(ctx context.Context, session *agent.Session, opts Options) *Model {
 }
 
 type eventMsg struct{ ev agent.Event }
+type appEventMsg struct{ ev any }
 type streamClosedMsg struct{}
+type appEventsClosedMsg struct{}
 
 func (m *Model) waitEvent() tea.Cmd {
 	ch := m.turn
@@ -158,11 +164,25 @@ func (m *Model) waitEvent() tea.Cmd {
 	}
 }
 
-func (m *Model) Init() tea.Cmd {
-	if m.state == stateOnboarding {
+func (m *Model) waitAppEvent() tea.Cmd {
+	ch := m.appEvents
+	if ch == nil {
 		return nil
 	}
-	return tea.Batch(textinput.Blink, tickCmd())
+	return func() tea.Msg {
+		ev, ok := <-ch
+		if !ok {
+			return appEventsClosedMsg{}
+		}
+		return appEventMsg{ev: ev}
+	}
+}
+
+func (m *Model) Init() tea.Cmd {
+	if m.state == stateOnboarding {
+		return m.waitAppEvent()
+	}
+	return tea.Batch(textinput.Blink, tickCmd(), m.waitAppEvent())
 }
 
 type SaveFunc func(s settings.Settings) error
@@ -176,11 +196,11 @@ func (m *Model) persist() {
 		return
 	}
 	_ = saveHook(settings.Settings{
-		Theme:   m.theme.Name,
-		Trusted: m.trusted,
+		Theme:    m.theme.Name,
+		Trusted:  m.trusted,
 		Provider: m.provider,
-		Pet:     m.pet,
-		PetName: m.petName,
+		Pet:      m.pet,
+		PetName:  m.petName,
 	})
 }
 
@@ -198,16 +218,13 @@ func (m *Model) enterChat() {
 	}
 	m.mainVP = viewport.New(m.width, m.vpHeight())
 	m.toolPanel = bubbles.NewToolPanel(m.theme)
-	m.codeBubble = bubbles.NewCodeBubble(m.theme)
-	m.fileTree = bubbles.NewFileTreeBubble(m.theme)
-	m.stm32Status = bubbles.NewSTM32StatusBubble(m.theme)
+	m.masonry = NewMasonryManager(m.theme)
 	m.input.Focus()
 }
 
-// vpHeight is the usable height for the main scrollable viewport.
-// Reserves 2 lines: input + status bar.
 func (m *Model) vpHeight() int {
-	h := m.height - 2
+	// fixed rows below viewport: input (1) + hint/status (1) + stream ticker (1)
+	h := m.height - 3
 	if h < 5 {
 		h = 5
 	}
@@ -221,13 +238,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.input.Width = msg.Width - 6
 		m.mainVP.Width = msg.Width
 		m.mainVP.Height = m.vpHeight()
-		m.petRendered = "" // invalidate cache on resize
-		return m, nil
-
-	case tea.MouseMsg:
-		if m.state == stateChat {
-			return m.updateChatMouse(msg)
-		}
+		m.petRendered = ""
 		return m, nil
 
 	case tea.KeyMsg:
@@ -253,12 +264,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.turn = nil
 		return m, nil
 
+	case appEventsClosedMsg:
+		m.appEvents = nil
+		return m, nil
+
 	case eventMsg:
 		m.route(msg.ev)
 		if _, ok := msg.ev.(agent.TurnEndEvent); ok {
 			m.thinking = false
 		}
 		return m, m.waitEvent()
+
+	case appEventMsg:
+		m.routeAppEvent(msg.ev)
+		return m, m.waitAppEvent()
 	}
 
 	if m.state == stateChat {
@@ -298,9 +317,25 @@ func (m *Model) updateOnboarding(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *Model) updateChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
-	// Ask bubble intercepts all input while waiting for an answer.
+	// Ask bubble intercepts all input while active.
 	if m.askBubble != nil && !m.askBubble.Answered() {
 		return m.updateAsk(msg)
+	}
+
+	// Masonry focus / dismiss — only when popup is hidden and not thinking.
+	if !m.popup.Visible() && m.masonry != nil && m.masonry.HasContent() {
+		switch key {
+		case "tab":
+			m.masonry.FocusNext()
+			return m, nil
+		case "shift+tab":
+			m.masonry.FocusPrev()
+			return m, nil
+		case "x":
+			if m.masonry.DismissFocused() {
+				return m, nil
+			}
+		}
 	}
 
 	if !m.popup.Visible() {
@@ -354,6 +389,10 @@ func (m *Model) updateChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		if m.thinking {
 			return m, nil
+		}
+		// Return to input clears masonry focus.
+		if m.masonry != nil {
+			m.masonry.ClearFocus()
 		}
 		if sug, ok := m.popup.Selected(); ok {
 			if m.input.Value() != sug.Value {
@@ -433,28 +472,14 @@ func (m *Model) submitAskAnswer() (tea.Model, tea.Cmd) {
 	return m, m.waitEvent()
 }
 
-func (m *Model) updateChatMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.MouseWheelUp:
-		m.showingVP = true
-		m.mainVP.LineUp(3)
-	case tea.MouseWheelDown:
-		m.mainVP.LineDown(3)
-		if m.mainVP.AtBottom() {
-			m.showingVP = false
-		}
-	}
-	return m, nil
-}
-
 func (m *Model) resetSession() {
 	m.session.Reset()
 	m.chat = bubbles.NewChat(m.theme)
 	m.thought = bubbles.NewThought(m.theme)
 	m.toolPanel = bubbles.NewToolPanel(m.theme)
-	m.codeBubble = bubbles.NewCodeBubble(m.theme)
-	m.fileTree = bubbles.NewFileTreeBubble(m.theme)
-	m.stm32Status = bubbles.NewSTM32StatusBubble(m.theme)
+	if m.masonry != nil {
+		m.masonry.Reset()
+	}
 	m.petRendered = ""
 	m.system = nil
 	m.err = nil
@@ -484,14 +509,8 @@ func (m *Model) runCommand(input string) (quit bool) {
 		if m.toolPanel != nil {
 			m.toolPanel.SetTheme(m.theme)
 		}
-		if m.codeBubble != nil {
-			m.codeBubble.SetTheme(m.theme)
-		}
-		if m.fileTree != nil {
-			m.fileTree.SetTheme(m.theme)
-		}
-		if m.stm32Status != nil {
-			m.stm32Status.SetTheme(m.theme)
+		if m.masonry != nil {
+			m.masonry.SetTheme(m.theme)
 		}
 	}
 	if res.NewPet != "" {
@@ -562,22 +581,16 @@ func (m *Model) route(ev agent.Event) {
 		if m.todoBubble != nil {
 			m.todoBubble.Handle(ev)
 		}
-		switch e.Name {
-		case "stm32_compile":
-			if len(e.Args) > 0 {
-				if t, ok := e.Args[0].(string); ok {
-					m.stm32Status.SetTarget(t)
-				}
-			}
-			m.stm32Status.CompileStart()
-		case "stm32_emulate":
-			m.stm32Status.EmulateStart()
-		}
+		m.routeToolStart(e)
 
 	case agent.ToolResultEvent:
 		m.toolPanel.Handle(ev)
 		m.chat.Handle(ev)
 		m.routeToolResult(e)
+
+	case agent.CodeFenceEvent:
+		code := m.masonry.Code()
+		code.UpdateFence(e.Lang, e.Content)
 
 	case agent.ArtifactEvent:
 		m.toolPanel.Handle(ev)
@@ -586,13 +599,12 @@ func (m *Model) route(ev agent.Event) {
 		m.chat.Handle(ev)
 		m.thought.Handle(ev)
 		m.toolPanel.Handle(ev)
-		m.codeBubble.Handle(ev)
-		m.fileTree.Handle(ev)
-		m.stm32Status.Handle(ev)
-		m.petRendered = "" // pet may change phase
+		m.petRendered = ""
 		m.showingVP = false
 		m.askBubble = nil
 		m.todoBubble = nil
+		m.streamTicker = ""
+		m.streamTokens = 0
 
 	default:
 		m.chat.Handle(ev)
@@ -600,52 +612,149 @@ func (m *Model) route(ev agent.Event) {
 		if m.todoBubble != nil {
 			m.todoBubble.Handle(ev)
 		}
+		// Update stream ticker on every raw token.
+		if tok, ok := ev.(agent.TokenEvent); ok {
+			m.updateStreamTicker(tok.Text)
+		}
 	}
 
 	if m.petBubble != nil {
 		m.petBubble.Handle(ev)
-		m.petRendered = "" // content changed, invalidate
+		m.petRendered = ""
+	}
+}
+
+func (m *Model) routeAppEvent(ev any) {
+	switch e := ev.(type) {
+	case toolchain.Event:
+		if m.masonry == nil {
+			return
+		}
+		m.masonry.BuildStatus().ToolchainEvent(e)
+		if e.Stage == "download" || e.Stage == "extract" {
+			m.masonry.Console().Start("toolchain")
+		}
+		if e.Stage == "ready" {
+			m.masonry.Console().Done("toolchain ready: "+string(e.Tool), false)
+		}
+		if e.Stage == "error" && e.Err != nil {
+			m.masonry.Console().Done(e.Err.Error(), true)
+		}
+	}
+}
+
+func (m *Model) routeToolStart(e agent.ToolStartEvent) {
+	if m.masonry == nil {
+		return
+	}
+	switch e.Name {
+	case "build":
+		bs := m.masonry.BuildStatus()
+		con := m.masonry.Console()
+		if len(e.Args) > 0 {
+			if t, ok := e.Args[0].(string); ok {
+				bs.SetTarget(t)
+			}
+		}
+		bs.BuildStart()
+		con.Start("build")
+	case "emulate":
+		m.masonry.BuildStatus().EmulateStart()
+		m.masonry.Console().Start("emulate")
+	case "flash":
+		m.masonry.Console().Start("flash")
+	case "workspace_init":
+		bs := m.masonry.BuildStatus()
+		ft := m.masonry.FileTree()
+		if len(e.Args) > 0 {
+			if name, ok := e.Args[0].(string); ok {
+				bs.SetProject(name)
+				ft.SetProject(name)
+			}
+		}
+	case "file_write":
+		code := m.masonry.Code()
+		ft := m.masonry.FileTree()
+		if len(e.Args) > 0 {
+			if path, ok := e.Args[0].(string); ok {
+				ft.AddFile(path)
+				if len(e.Args) > 1 {
+					if content, ok := e.Args[1].(string); ok {
+						code.Update(path, content)
+					}
+				}
+			}
+		}
+	case "file_list":
+		m.masonry.FileTree() // ensure visible
 	}
 }
 
 func (m *Model) routeToolResult(e agent.ToolResultEvent) {
 	result := e.Result
 	failed := strings.HasPrefix(result, "ERROR:") ||
-		strings.HasPrefix(result, "COMPILE FAILED:") ||
+		strings.HasPrefix(result, "BUILD FAILED:") ||
+		strings.HasPrefix(result, "FLASH FAILED:") ||
 		strings.HasPrefix(result, "QEMU error:")
 
+	if m.masonry == nil {
+		return
+	}
 	switch e.Name {
-	case "stm32_compile":
-		if failed {
-			m.stm32Status.CompileFail(result)
+	case "build":
+		bs := m.masonry.BuildStatus()
+		con := m.masonry.Console()
+		if strings.Contains(result, "toolchain is downloading") {
+			bs.BuildStart()
+			con.Start("toolchain")
+		} else if failed {
+			bs.BuildFail(result)
+			con.Done(result, true)
 		} else {
-			m.stm32Status.CompileOK(result)
+			bs.BuildOK(result)
+			con.Done(result, false)
 		}
-	case "stm32_emulate":
+	case "emulate":
+		bs := m.masonry.BuildStatus()
+		con := m.masonry.Console()
 		if failed {
-			m.stm32Status.EmulateFail(result)
+			bs.EmulateFail(result)
+			con.Done(result, true)
 		} else {
-			m.stm32Status.EmulateOK(result)
+			bs.EmulateOK(result)
+			con.Done(result, false)
 		}
-	case "stm32_write_file":
+	case "flash":
+		m.masonry.Console().Done(result, failed)
+	case "file_write":
 		if !failed {
 			if path, content := m.extractWriteFileArgs(); path != "" {
-				m.codeBubble.Update(path, content)
-				m.fileTree.AddFile(path)
+				m.masonry.Code().Update(path, content)
+				m.masonry.FileTree().AddFile(path)
 			}
 		}
-	case "stm32_list_files":
+	case "file_list":
+		ft := m.masonry.FileTree()
 		for _, line := range strings.Split(result, "\n") {
 			line = strings.TrimSpace(line)
-			if line != "" && !strings.HasPrefix(line, "ERROR") {
-				m.fileTree.AddFile(line)
+			if line != "" && !strings.HasPrefix(line, "(") && !strings.HasPrefix(line, "ERROR") {
+				ft.AddFile(line)
+			}
+		}
+	case "workspace_init":
+		if !failed {
+			args := m.toolPanel.LastCallArgs("workspace_init")
+			if len(args) > 0 {
+				if name, ok := args[0].(string); ok {
+					m.masonry.FileTree().SetProject(name)
+				}
 			}
 		}
 	}
 }
 
 func (m *Model) extractWriteFileArgs() (path, content string) {
-	args := m.toolPanel.LastCallArgs("stm32_write_file")
+	args := m.toolPanel.LastCallArgs("file_write")
 	if len(args) >= 1 {
 		path, _ = args[0].(string)
 	}
@@ -673,48 +782,86 @@ func (m *Model) chatView() string {
 	hintStyle := lipgloss.NewStyle().Foreground(t.Muted)
 	errStyle := lipgloss.NewStyle().Foreground(t.ErrorFg).Bold(true)
 	busyStyle := lipgloss.NewStyle().Foreground(t.WarnFg)
+	tickStyle := lipgloss.NewStyle().Foreground(t.Muted).Italic(true)
 	sysStyle := lipgloss.NewStyle().Foreground(t.Accent).Italic(true)
 
-	// Build all chat content into one string for the main viewport.
-	var content []string
+	hasRight := m.masonry != nil && m.masonry.HasContent()
+	const minRightWidth = 42
+	useTwoCol := hasRight && w >= minRightWidth+30
 
-	if m.petBubble != nil {
-		content = append(content, m.petView(w))
-	}
-	if latest := m.chat.RenderLatest(w); latest != "" {
-		content = append(content, latest)
-	}
-	if m.thought.HasContent() {
-		content = append(content, m.thought.View(w))
-	}
-	if m.todoBubble != nil {
-		content = append(content, m.todoBubble.View(w))
-	}
-	if m.toolPanel != nil && m.toolPanel.HasContent() {
-		content = append(content, m.toolPanel.View(w))
-	}
-	if m.stm32Status != nil && m.stm32Status.HasContent() {
-		content = append(content, m.stm32Status.View(w))
-	}
-	if m.codeBubble != nil && m.codeBubble.HasContent() {
-		content = append(content, m.codeBubble.View(w))
-	}
-	if m.fileTree != nil && m.fileTree.HasContent() {
-		content = append(content, m.fileTree.View(w))
-	}
-	if m.askBubble != nil {
-		content = append(content, m.askBubble.View(w))
-	}
-	for _, s := range m.system {
-		content = append(content, sysStyle.Render("» "+s))
-	}
-	if m.err != nil {
-		content = append(content, errStyle.Render("error: "+m.err.Error()))
+	// The viewport holds the full scrollable history: all chat turns + live
+	// bubbles. This makes pgup/pgdown scroll through everything.
+	var vpContent string
+	if useTwoCol {
+		rightW := w * 60 / 100
+		if rightW < minRightWidth {
+			rightW = minRightWidth
+		}
+		leftW := w - rightW - 1
+
+		var left []string
+		// Full chat history (all turns with assistant prose).
+		if all := m.chat.RenderAll(leftW); all != "" {
+			left = append(left, all)
+		}
+		// Live per-turn bubbles appended below history.
+		if m.thought.HasContent() {
+			left = append(left, m.thought.View(leftW))
+		}
+		if m.todoBubble != nil {
+			left = append(left, m.todoBubble.View(leftW))
+		}
+		if m.askBubble != nil {
+			left = append(left, m.askBubble.View(leftW))
+		}
+		for _, s := range m.system {
+			left = append(left, sysStyle.Render("» "+s))
+		}
+		if m.err != nil {
+			left = append(left, errStyle.Render("error: "+m.err.Error()))
+		}
+		// Pet pinned at the bottom of the left column.
+		if m.petBubble != nil {
+			left = append(left, m.petView(leftW))
+		}
+
+		leftStr := strings.Join(left, "\n")
+		rightStr := m.masonry.View(rightW, m.tick)
+
+		vpContent = lipgloss.JoinHorizontal(lipgloss.Top,
+			lipgloss.NewStyle().Width(leftW).Render(leftStr),
+			" ",
+			lipgloss.NewStyle().Width(rightW).Render(rightStr),
+		)
+	} else {
+		var content []string
+		if all := m.chat.RenderAll(w); all != "" {
+			content = append(content, all)
+		}
+		if m.thought.HasContent() {
+			content = append(content, m.thought.View(w))
+		}
+		if m.todoBubble != nil {
+			content = append(content, m.todoBubble.View(w))
+		}
+		if hasRight {
+			content = append(content, m.masonry.View(w, m.tick))
+		}
+		if m.askBubble != nil {
+			content = append(content, m.askBubble.View(w))
+		}
+		for _, s := range m.system {
+			content = append(content, sysStyle.Render("» "+s))
+		}
+		if m.err != nil {
+			content = append(content, errStyle.Render("error: "+m.err.Error()))
+		}
+		if m.petBubble != nil {
+			content = append(content, m.petView(w))
+		}
+		vpContent = strings.Join(content, "\n")
 	}
 
-	// Feed built content into the viewport. If not in manual scroll mode,
-	// always snap to the bottom so new content is visible immediately.
-	vpContent := strings.Join(content, "\n")
 	m.mainVP.SetContent(vpContent)
 	if !m.showingVP {
 		m.mainVP.GotoBottom()
@@ -727,7 +874,6 @@ func (m *Model) chatView() string {
 		rows = append(rows, m.popup.View(m.theme, w))
 	}
 
-	// Bottom bar: input + status, or ask hint.
 	if m.askBubble != nil && !m.askBubble.Answered() {
 		rows = append(rows, hintStyle.Render("↑↓ navigate • enter select • ctrl+c quit"))
 	} else {
@@ -735,12 +881,12 @@ func (m *Model) chatView() string {
 		if !m.trusted {
 			trustTag = "read-only"
 		}
-		status := "ctrl+c quit • ctrl+r reset • / commands • " + trustTag
+		status := "ctrl+c quit • ctrl+r reset • / commands • tab focus • x dismiss • " + trustTag
 		if len(m.chat.Turns()) > 0 {
 			if m.showingVP {
 				status += " • esc to latest"
 			} else {
-				status += " • scroll to browse"
+				status += " • pgup/pgdn scroll"
 			}
 		}
 		if m.thinking {
@@ -749,15 +895,49 @@ func (m *Model) chatView() string {
 		rows = append(rows, m.input.View(), hintStyle.Render(status))
 	}
 
+	// Stream ticker: one rolling line showing live tokens + count.
+	// Shown whenever a turn is in flight; blank otherwise.
+	if m.thinking && m.streamTicker != "" {
+		maxTok := w - 16
+		if maxTok < 10 {
+			maxTok = 10
+		}
+		tok := m.streamTicker
+		if len([]rune(tok)) > maxTok {
+			runes := []rune(tok)
+			tok = "…" + string(runes[len(runes)-maxTok:])
+		}
+		tickerLine := fmt.Sprintf("[%4d tok] %s", m.streamTokens, tok)
+		rows = append(rows, tickStyle.Render(tickerLine))
+	} else if m.thinking {
+		rows = append(rows, tickStyle.Render("waiting for tokens…"))
+	} else {
+		rows = append(rows, "") // keep height stable
+	}
+
 	return strings.Join(rows, "\n")
 }
 
-// petView returns the cached pet bubble render, only re-rendering when the
-// animation frame or content has changed. This avoids calling glamour on
-// every 80ms tick.
+func (m *Model) updateStreamTicker(text string) {
+	if text == "" {
+		return
+	}
+	m.streamTokens++
+	// Collapse whitespace to spaces so the ticker stays single-line.
+	flat := strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' {
+			return ' '
+		}
+		return r
+	}, text)
+	// Append to rolling buffer, capped at 500 chars.
+	m.streamTicker += flat
+	if len(m.streamTicker) > 500 {
+		m.streamTicker = m.streamTicker[len(m.streamTicker)-500:]
+	}
+}
+
 func (m *Model) petView(w int) string {
-	// Animation: pet updates every 3 ticks (~240ms). Content changes
-	// invalidate m.petRendered directly via route().
 	animTick := m.tick / 3
 	if m.petRendered == "" || animTick != m.petRenderTick || w != m.petRenderWidth {
 		m.petRendered = m.petBubble.View(w, m.tick)
@@ -832,12 +1012,16 @@ func (m *Model) buildCommands() *commands.Registry {
 	r.Register(&commands.Command{
 		Name:        "trust",
 		Description: "trust this directory (allow tool use)",
-		Run:         func(args []string) commands.Result { return commands.Result{NewTrusted: &tt, Message: "directory trusted"} },
+		Run: func(args []string) commands.Result {
+			return commands.Result{NewTrusted: &tt, Message: "directory trusted"}
+		},
 	})
 	r.Register(&commands.Command{
 		Name:        "untrust",
 		Description: "revoke trust for this directory",
-		Run:         func(args []string) commands.Result { return commands.Result{NewTrusted: &ff, Message: "directory untrusted (read-only)"} },
+		Run: func(args []string) commands.Result {
+			return commands.Result{NewTrusted: &ff, Message: "directory untrusted (read-only)"}
+		},
 	})
 
 	providers := []string{
@@ -866,7 +1050,9 @@ func (m *Model) buildCommands() *commands.Registry {
 	r.Register(&commands.Command{
 		Name:        "reset",
 		Description: "reset the agent session",
-		Run:         func(args []string) commands.Result { return commands.Result{ResetSession: true, Message: "session reset"} },
+		Run: func(args []string) commands.Result {
+			return commands.Result{ResetSession: true, Message: "session reset"}
+		},
 	})
 	r.Register(&commands.Command{
 		Name:        "clear",

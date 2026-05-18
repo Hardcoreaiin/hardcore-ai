@@ -23,6 +23,47 @@ type ParsedLine struct {
 	Err      error  // Call only — set if call line was malformed
 }
 
+// ParseFullText scans a complete (multi-line) model response for a CALL block.
+// Unlike ParseLine it can find a CALL whose argument list spans multiple lines
+// (e.g. a file_write with embedded newlines). Returns a LineCall ParsedLine if
+// found, otherwise a LinePlain zero value.
+func ParseFullText(text string) ParsedLine {
+	upper := strings.ToUpper(text)
+	idx := strings.Index(upper, "\nCALL ")
+	if idx == -1 {
+		// Also check if the text starts with CALL (no leading newline)
+		if strings.HasPrefix(upper, "CALL ") || strings.HasPrefix(upper, "CALL\t") {
+			idx = -1 // handled below
+		} else {
+			return ParsedLine{Kind: LinePlain}
+		}
+	}
+
+	var callBody string
+	if idx == -1 {
+		// CALL at the very start
+		callBody = strings.TrimLeft(text[4:], ":= \t")
+	} else {
+		after := text[idx+1:] // skip the \n
+		callBody = strings.TrimLeft(after[4:], ":= \t")
+	}
+
+	// Find matching closing paren — it may be on a later line.
+	open := strings.IndexByte(callBody, '(')
+	if open == -1 {
+		return ParsedLine{Kind: LinePlain}
+	}
+	close := strings.LastIndexByte(callBody, ')')
+	if close == -1 || close < open {
+		return ParsedLine{Kind: LinePlain}
+	}
+
+	name := strings.TrimSpace(callBody[:open])
+	args := callBody[open+1 : close]
+	tokens := Tokenize(args)
+	return ParsedLine{Kind: LineCall, FuncName: name, Tokens: tokens, Text: callBody}
+}
+
 // ParseLine classifies a single line of model output.
 func ParseLine(raw string) ParsedLine {
 	stripped := strings.TrimSpace(raw)

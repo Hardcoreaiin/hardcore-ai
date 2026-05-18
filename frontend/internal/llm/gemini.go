@@ -140,6 +140,12 @@ func (c *GeminiClient) Stream(ctx context.Context, msgs []Message) (<-chan Line,
 				if token == "" {
 					continue
 				}
+				// Emit the raw token immediately for the stream ticker.
+				select {
+				case out <- Line{Token: token}:
+				case <-ctx.Done():
+					return
+				}
 				for {
 					idx := strings.IndexByte(token, '\n')
 					if idx < 0 {
