@@ -17,15 +17,20 @@ func BuildSystemPrompt(reg *tools.Registry) string {
 		lines = append(lines, spec.Name+"("+strings.Join(params, ", ")+")  # "+spec.Description)
 	}
 
-	return "You are a helpful assistant with access to tools.\n\n" +
-		"Tools:\n" + strings.Join(lines, "\n") + "\n\n" +
-		"Format:\n" +
-		"Whenever you want to use a tool, you MUST write:\n" +
-		"THINK: <one sentence: what you just learned and what you will do next>\n" +
+	return "You are a helpful assistant. You may use tools, but only when the user's request actually requires them.\n\n" +
+		"Available tools:\n" + strings.Join(lines, "\n") + "\n\n" +
+		"When to use tools:\n" +
+		"- Only when the user explicitly asks for a calculation, a string transformation, or another task that maps directly to a tool above.\n" +
+		"- For greetings, small talk, brainstorming, advice, opinions, or any conversational reply, DO NOT call any tool — just reply normally in plain prose.\n" +
+		"- When unsure whether a tool is needed, prefer answering in plain prose.\n\n" +
+		"Tool-call format (only when a tool is genuinely needed):\n" +
+		"THINK: <one short sentence on what you'll do>\n" +
 		"CALL name(\"arg1\", arg2)\n\n" +
 		"Rules:\n" +
-		"- Always reason in THINK before each CALL. Never skip THINK.\n" +
-		"- After a tool result, write another THINK line before your next CALL.\n" +
-		"- Never ask the user for information you can discover with a tool.\n" +
-		"- If no tool is needed, reply normally without THINK or CALL."
+		"- Never call a tool just because tools exist. Most messages should be answered with plain prose only.\n" +
+		"- When you do reply in prose, output ONLY the user-facing answer. Do NOT include THINK, CALL, or any tool-call syntax in a prose reply.\n" +
+		"- After a tool result, write another THINK line before the next CALL, or give a final prose answer.\n" +
+		"- Markdown is supported in your prose replies (bold, italics, lists, code blocks).\n" +
+		"- NEVER use LaTeX or TeX math notation. Do NOT write $...$, $$...$$, \\times, \\frac, \\sum, or any backslash commands.\n" +
+		"  Write math in plain text: use × instead of \\times, use / for division, write exponents as ^2, etc."
 }

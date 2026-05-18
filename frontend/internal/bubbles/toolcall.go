@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/agent"
+	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/theme"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -17,17 +18,17 @@ type ToolCall struct {
 	Result    string
 	HasResult bool
 	Artifacts []agent.ArtifactEvent
+	theme     *theme.Theme
 }
 
-func NewToolCall(start agent.ToolStartEvent) *ToolCall {
-	return &ToolCall{Name: start.Name, Args: start.Args}
+func NewToolCall(start agent.ToolStartEvent, t *theme.Theme) *ToolCall {
+	return &ToolCall{Name: start.Name, Args: start.Args, theme: t}
 }
 
 func (t *ToolCall) Title() string { return t.Name }
 
-// Handle is unused for ToolCall — the TUI routes result/artifact events
-// to the right instance directly. We still satisfy the interface so that
-// stray events are safely ignored.
+func (t *ToolCall) SetTheme(th *theme.Theme) { t.theme = th }
+
 func (t *ToolCall) Handle(ev agent.Event) bool { return false }
 
 func (t *ToolCall) ApplyResult(r agent.ToolResultEvent) {
@@ -39,37 +40,29 @@ func (t *ToolCall) ApplyArtifact(a agent.ArtifactEvent) {
 	t.Artifacts = append(t.Artifacts, a)
 }
 
-var (
-	callBorder = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("36")).
-			Padding(0, 1)
-	callBorderPending = lipgloss.NewStyle().
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("214")).
-				Padding(0, 1)
-	callName  = lipgloss.NewStyle().Foreground(lipgloss.Color("36")).Bold(true)
-	resultStr = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
-	artifact  = lipgloss.NewStyle().Foreground(lipgloss.Color("177"))
-)
-
 func (t *ToolCall) View(width int) string {
+	border := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(t.theme.ToolFg).
+		Padding(0, 1)
+	if !t.HasResult {
+		border = border.BorderForeground(t.theme.BorderPending)
+	}
+	callName := lipgloss.NewStyle().Foreground(t.theme.ToolFg).Bold(true)
+	resultStr := lipgloss.NewStyle().Foreground(t.theme.Text)
+	artifact := lipgloss.NewStyle().Foreground(t.theme.Accent)
+
 	var b strings.Builder
 	b.WriteString(callName.Render(t.Name+"(") + formatArgs(t.Args) + callName.Render(")"))
 	if t.HasResult {
-		arrow := " → "
-		b.WriteString(arrow + resultStr.Render(truncate(t.Result, width-len(t.Name)-12)))
+		b.WriteString(" → " + resultStr.Render(truncate(t.Result, width-len(t.Name)-12)))
 	} else {
 		b.WriteString(" " + lipgloss.NewStyle().Faint(true).Render("…"))
 	}
 	for _, a := range t.Artifacts {
 		b.WriteString("\n" + artifact.Render(fmt.Sprintf("⚑ %s: %v", a.Artifact.Type, a.Artifact.Payload)))
 	}
-	style := callBorder
-	if !t.HasResult {
-		style = callBorderPending
-	}
-	return style.Width(width - 2).Render(b.String())
+	return border.Width(width - 2).Render(b.String())
 }
 
 func formatArgs(args []any) string {

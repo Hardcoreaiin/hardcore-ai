@@ -2,19 +2,25 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/signal"
+	"os/user"
 	"strings"
 	"syscall"
 
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/agent"
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/config"
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/llm"
+	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/settings"
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/tools"
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/tui"
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+const version = "v0.2.0"
 
 func main() {
 	headless := false
@@ -48,13 +54,58 @@ func main() {
 		return
 	}
 
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "cwd error:", err)
+		os.Exit(1)
+	}
+
+	existing, loaded := loadSettings(cwd)
+
+	// If a provider was saved, rebuild the client before starting the session.
+	if loaded && existing.Provider != "" {
+		loop.SwapClient(config.LoadForProvider(config.Provider(existing.Provider)).BuildClient())
+	}
+
+	tui.SetSaveHook(func(s settings.Settings) error {
+		return settings.Save(cwd, s)
+	})
+
 	session := loop.NewSession()
-	model := tui.New(ctx, session)
+	model := tui.New(ctx, session, tui.Options{
+		Root:     cwd,
+		User:     currentUser(),
+		Version:  version,
+		Existing: existing,
+		Loaded:   loaded,
+	})
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "tui error:", err)
 		os.Exit(1)
 	}
+}
+
+func loadSettings(cwd string) (settings.Settings, bool) {
+	s, err := settings.Load(cwd)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return settings.Settings{}, false
+		}
+		fmt.Fprintln(os.Stderr, "settings load warning:", err)
+		return settings.Settings{}, false
+	}
+	return s, true
+}
+
+func currentUser() string {
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		return u.Username
+	}
+	if n := os.Getenv("USER"); n != "" {
+		return n
+	}
+	return "friend"
 }
 
 func runHeadless(ctx context.Context, loop *agent.Loop, prompt string) {
@@ -84,14 +135,7 @@ func runHeadless(ctx context.Context, loop *agent.Loop, prompt string) {
 	}
 }
 
-func buildClient(cfg config.LLMConfig) llm.Client {
-	switch cfg.Provider {
-	case config.ProviderGemini:
-		return llm.NewGemini(llm.GeminiConfig{URL: cfg.URL, Model: cfg.Model, APIKey: cfg.APIKey})
-	default:
-		return llm.NewOpenAI(llm.OpenAIConfig{URL: cfg.URL, Model: cfg.Model, APIKey: cfg.APIKey})
-	}
-}
+func buildClient(cfg config.LLMConfig) llm.Client { return cfg.BuildClient() }
 
 func formatArgs(args []any) string {
 	parts := make([]string, len(args))

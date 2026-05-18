@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"os"
 	"strings"
+
+	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/llm"
 )
 
 type Provider string
@@ -21,13 +23,25 @@ type LLMConfig struct {
 	APIKey   string
 }
 
+// BuildClient constructs the llm.Client for this config.
+func (c LLMConfig) BuildClient() llm.Client {
+	switch c.Provider {
+	case ProviderGemini:
+		return llm.NewGemini(llm.GeminiConfig{URL: c.URL, Model: c.Model, APIKey: c.APIKey})
+	default:
+		return llm.NewOpenAI(llm.OpenAIConfig{URL: c.URL, Model: c.Model, APIKey: c.APIKey})
+	}
+}
+
 func Load() LLMConfig {
 	loadDotEnv(".env")
+	return LoadForProvider(Provider(getenv("LLM_PROVIDER", string(ProviderLlamaCpp))))
+}
 
-	provider := Provider(getenv("LLM_PROVIDER", string(ProviderLlamaCpp)))
-
+// LoadForProvider returns an LLMConfig for the given provider, reading
+// the relevant env vars (after any .env file has been loaded).
+func LoadForProvider(provider Provider) LLMConfig {
 	cfg := LLMConfig{Provider: provider}
-
 	switch provider {
 	case ProviderOpenRouter:
 		cfg.URL = getenv("OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions")
@@ -42,7 +56,6 @@ func Load() LLMConfig {
 		cfg.URL = getenv("LLAMACPP_URL", "http://localhost:8080/v1/chat/completions")
 		cfg.Model = getenv("LLAMACPP_MODEL", "prism-ml/Bonsai-8B-gguf:Q1_0")
 	}
-
 	return cfg
 }
 

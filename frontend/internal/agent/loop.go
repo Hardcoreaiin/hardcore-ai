@@ -90,9 +90,8 @@ func (l *Loop) runTurn(ctx context.Context, msgs *[]llm.Message, emit func(Event
 			case LineCall:
 				p := pl
 				pendingCall = &p
-				if !emit(LineEvent{Text: line.Text}) {
-					return
-				}
+				// Intentionally don't emit a LineEvent: CALL syntax is
+				// internal and must never reach the chat view.
 			default:
 				if !emit(LineEvent{Text: line.Text}) {
 					return
@@ -197,3 +196,8 @@ func (s *Session) Send(ctx context.Context, userPrompt string) <-chan Event {
 func (s *Session) Reset() {
 	s.msgs = s.msgs[:1]
 }
+
+// SwapClient replaces the underlying LLM client for future turns.
+func (l *Loop) SwapClient(c llm.Client) { l.llm = c }
+
+func (s *Session) SwapClient(c llm.Client) { s.loop.SwapClient(c) }
