@@ -1,0 +1,44 @@
+[
+  {
+    "ID": 1,
+    "Timestamp": "2026-05-15T14:23:35.7693085+05:30",
+    "Level": "INFO",
+    "Type": "SYSTEM",
+    "Message": "Agent Started"
+  },
+  {
+    "ID": 2,
+    "Timestamp": "2026-05-15T14:23:36.7709671+05:30",
+    "Level": "DEBUG",
+    "Type": "THINKING",
+    "Message": "Analyzing task"
+  },
+  {
+    "ID": 3,
+    "Timestamp": "2026-05-15T14:23:37.7714787+05:30",
+    "Level": "INFO",
+    "Type": "TOOL",
+    "Message": "Calling web search"
+  },
+  {
+    "ID": 4,
+    "Timestamp": "2026-05-15T14:23:38.7730926+05:30",
+    "Level": "WARNING",
+    "Type": "NETWORK",
+    "Message": "Slow response detected"
+  },
+  {
+    "ID": 5,
+    "Timestamp": "2026-05-15T14:23:39.7739696+05:30",
+    "Level": "ERROR",
+    "Type": "TOOL",
+    "Message": "Tool timeout"
+  },
+  {
+    "ID": 6,
+    "Timestamp": "2026-05-15T14:23:40.7753372+05:30",
+    "Level": "INFO",
+    "Type": "SYSTEM",
+    "Message": "Retry successful"
+  }
+]
