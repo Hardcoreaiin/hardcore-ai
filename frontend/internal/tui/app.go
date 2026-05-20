@@ -4,6 +4,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -333,7 +334,26 @@ func (m *Model) updateChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.masonry.FocusPrev()
 			return m, nil
 		case "x":
-			if m.masonry.DismissFocused() {
+			// Only intercept when a bubble is explicitly focused via tab.
+			if m.masonry.AnyFocused() && m.masonry.DismissFocused() {
+				return m, nil
+			}
+		case "-", "m":
+			// Only intercept when a bubble is explicitly focused via tab.
+			if m.masonry.AnyFocused() && m.masonry.ToggleMinimizeFocused() {
+				return m, nil
+			}
+		default:
+			if m.masonry.UpdateFocused(msg) {
+				ft := m.masonry.FileTree()
+				if ft.OnSelect == nil {
+					ft.OnSelect = func(path string) {
+						full := filepath.Join(m.root, filepath.FromSlash(path))
+						if b, err := os.ReadFile(full); err == nil {
+							m.masonry.Code().Update(path, string(b))
+						}
+					}
+				}
 				return m, nil
 			}
 		}
@@ -595,7 +615,7 @@ func (m *Model) route(ev agent.Event) {
 
 	case agent.CodeFenceEvent:
 		if m.masonry != nil {
-			code := m.masonry.Code()
+			code := m.masonry.NewCodeBubble()
 			code.UpdateFence(e.Lang, e.Content)
 		}
 
@@ -702,14 +722,23 @@ func (m *Model) routeToolStart(e agent.ToolStartEvent) {
 	case "workspace_status":
 		m.masonry.FileTree()
 	case "file_write":
-		code := m.masonry.Code()
+		// Each file_write gets its OWN CodeBubble so writes appear as
+		// separate bubbles in the masonry panel.
+		code := m.masonry.NewCodeBubble()
 		ft := m.masonry.FileTree()
 		if len(e.Args) > 0 {
 			if path, ok := e.Args[0].(string); ok {
 				ft.AddFile(path)
 				if len(e.Args) > 1 {
 					if content, ok := e.Args[1].(string); ok {
-						code.Update(path, content)
+						oldContent := ""
+						if m.root != "" {
+							full := filepath.Join(m.root, filepath.FromSlash(path))
+							if b, err := os.ReadFile(full); err == nil {
+								oldContent = string(b)
+							}
+						}
+						code.UpdateDiff(path, content, oldContent)
 					}
 				}
 			}
@@ -758,7 +787,17 @@ func (m *Model) routeToolResult(e agent.ToolResultEvent) {
 	case "file_write":
 		if !failed {
 			if path, content := m.extractWriteFileArgs(); path != "" {
-				m.masonry.Code().Update(path, content)
+				oldContent := ""
+				if m.root != "" {
+					full := filepath.Join(m.root, filepath.FromSlash(path))
+					if b, err := os.ReadFile(full); err == nil {
+						oldContent = string(b)
+					}
+				}
+				// Update the most recent code bubble (created in routeToolStart).
+				if code := m.masonry.LatestCode(); code != nil {
+					code.UpdateDiff(path, content, oldContent)
+				}
 				m.masonry.FileTree().AddFile(path)
 			}
 		}

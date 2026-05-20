@@ -6,6 +6,7 @@ import (
 
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/agent"
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/theme"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -15,6 +16,8 @@ type FileTreeBubble struct {
 	project string   // project name shown as root
 	files   []string // relative paths
 	theme   *theme.Theme
+	cursor  int      // currently selected file index
+	OnSelect func(path string)
 }
 
 func NewFileTreeBubble(t *theme.Theme) *FileTreeBubble {
@@ -50,6 +53,27 @@ func (b *FileTreeBubble) Handle(_ agent.Event) bool { return false }
 func (b *FileTreeBubble) Reset() {
 	b.files = nil
 	b.project = "workspace"
+	b.cursor = 0
+}
+
+func (b *FileTreeBubble) Update(msg tea.Msg) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "up", "k":
+			if b.cursor > 0 {
+				b.cursor--
+			}
+		case "down", "j":
+			if b.cursor < len(b.files)-1 {
+				b.cursor++
+			}
+		case "enter":
+			if b.cursor >= 0 && b.cursor < len(b.files) && b.OnSelect != nil {
+				b.OnSelect(b.files[b.cursor])
+			}
+		}
+	}
 }
 
 func (b *FileTreeBubble) View(width int) string {
@@ -78,16 +102,29 @@ func (b *FileTreeBubble) View(width int) string {
 	sb.WriteString(rootStyle.Render(b.project+"/") + "\n")
 
 	seenDirs := map[string]bool{}
+	fileIdx := 0
 	for _, e := range entries {
 		if e.dir != "" {
 			if !seenDirs[e.dir] {
 				seenDirs[e.dir] = true
 				sb.WriteString("  " + dirStyle.Render(e.dir+"/") + "\n")
 			}
-			sb.WriteString("    " + fileStyle.Render("└─ "+e.file) + "\n")
+			
+			prefix := "    └─ "
+			if b.cursor == fileIdx {
+				sb.WriteString(lipgloss.NewStyle().Foreground(t.Accent).Render("  ▶ ") + fileStyle.Render(e.file) + "\n")
+			} else {
+				sb.WriteString(fileStyle.Render(prefix+e.file) + "\n")
+			}
 		} else {
-			sb.WriteString("  " + fileStyle.Render("├─ "+e.file) + "\n")
+			prefix := "  ├─ "
+			if b.cursor == fileIdx {
+				sb.WriteString(lipgloss.NewStyle().Foreground(t.Accent).Render("▶ ") + fileStyle.Render(e.file) + "\n")
+			} else {
+				sb.WriteString(fileStyle.Render(prefix+e.file) + "\n")
+			}
 		}
+		fileIdx++
 	}
 
 	body := strings.TrimRight(sb.String(), "\n")

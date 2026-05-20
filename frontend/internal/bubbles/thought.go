@@ -23,6 +23,8 @@ func (t *Thought) Title() string { return "thought" }
 
 func (t *Thought) SetTheme(th *theme.Theme) { t.theme = th }
 
+const maxThoughtLines = 100
+
 func (t *Thought) Handle(ev agent.Event) bool {
 	switch e := ev.(type) {
 	case agent.UserMessageEvent:
@@ -30,6 +32,10 @@ func (t *Thought) Handle(ev agent.Event) bool {
 		return true
 	case agent.ThinkEvent:
 		t.current = append(t.current, e.Text)
+		// Prevent unbounded growth that would OOM / lag the renderer.
+		if len(t.current) > maxThoughtLines {
+			t.current = t.current[len(t.current)-maxThoughtLines:]
+		}
 		return true
 	}
 	return false
