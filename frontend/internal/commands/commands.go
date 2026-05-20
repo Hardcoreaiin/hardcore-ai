@@ -36,6 +36,12 @@ type Result struct {
 	// Quit asks the caller to exit the program.
 	Quit bool
 
+	// StartUpload signals that the file picker upload interface should open.
+	StartUpload bool
+
+	// ClearRAGDB signals that the local RAG SQLite database should be deleted and recreated.
+	ClearRAGDB bool
+
 	// Err non-nil signals the user-facing error to render.
 	Err error
 }

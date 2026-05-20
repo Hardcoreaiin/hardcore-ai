@@ -79,12 +79,14 @@ func seedFTSDB(t *testing.T) *storage.DB {
 		}
 		chunkID, _ := res.LastInsertId()
 
-		// FTS5 content tables must be populated explicitly.
-		if _, err := db.Exec(`
-			INSERT INTO chunk_fts (rowid, chunk_text, section_title, peripheral, register_name)
-			VALUES (?, ?, ?, ?, ?)
-		`, chunkID, c.text, c.section, c.peripheral, c.register); err != nil {
-			t.Fatalf("insert chunk_fts chunkID=%d: %v", chunkID, err)
+		// FTS5 content tables must be populated explicitly if FTS5 is available.
+		if db.HasFTS5 {
+			if _, err := db.Exec(`
+				INSERT INTO chunk_fts (rowid, chunk_text, section_title, peripheral, register_name)
+				VALUES (?, ?, ?, ?, ?)
+			`, chunkID, c.text, c.section, c.peripheral, c.register); err != nil {
+				t.Fatalf("insert chunk_fts chunkID=%d: %v", chunkID, err)
+			}
 		}
 	}
 

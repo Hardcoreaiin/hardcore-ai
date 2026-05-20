@@ -15,6 +15,14 @@ type Indexer struct {
 	embedder *Embedder
 }
 
+var Verbose = true
+
+func logInfo(format string, args ...any) {
+	if Verbose {
+		fmt.Printf(format, args...)
+	}
+}
+
 // NewIndexer opens the database and returns a ready Indexer.
 func NewIndexer(dbPath string, embedder *Embedder) (*Indexer, error) {
 	db, err := sql.Open("sqlite3", dbPath)
@@ -26,7 +34,7 @@ func NewIndexer(dbPath string, embedder *Embedder) (*Indexer, error) {
 		return nil, fmt.Errorf("failed to connect: %w", err)
 	}
 
-	fmt.Println("✅ Indexer ready")
+	logInfo("✅ Indexer ready\n")
 	return &Indexer{db: db, embedder: embedder}, nil
 }
 
@@ -35,7 +43,7 @@ func NewIndexer(dbPath string, embedder *Embedder) (*Indexer, error) {
 //
 // chunkIDs and chunkTexts must be the same length and in the same order.
 func (idx *Indexer) IndexChunks(chunkIDs []int, chunkTexts []string) error {
-	fmt.Printf("🔢 Generating embeddings for %d chunks...\n", len(chunkTexts))
+	logInfo("🔢 Generating embeddings for %d chunks...\n", len(chunkTexts))
 
 	embeddings, err := idx.embedder.EmbedBatch(chunkTexts)
 	if err != nil {
@@ -67,7 +75,7 @@ func (idx *Indexer) IndexChunks(chunkIDs []int, chunkTexts []string) error {
 		return fmt.Errorf("failed to commit: %w", err)
 	}
 
-	fmt.Printf("✅ Stored %d embeddings in chunks.embedding\n", len(embeddings))
+	logInfo("✅ Stored %d embeddings in chunks.embedding\n", len(embeddings))
 	return nil
 }
 

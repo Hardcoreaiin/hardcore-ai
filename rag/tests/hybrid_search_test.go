@@ -119,11 +119,13 @@ func seedHybridDB(t *testing.T) *storage.DB {
 			t.Fatalf("update embedding: %v", err)
 		}
 
-		if _, err := db.Exec(`
-			INSERT INTO chunk_fts (rowid, chunk_text, section_title, peripheral, register_name)
-			VALUES (?, ?, ?, ?, ?)
-		`, chunkID, c.text, c.section, c.peripheral, c.register); err != nil {
-			t.Fatalf("insert chunk_fts: %v", err)
+		if db.HasFTS5 {
+			if _, err := db.Exec(`
+				INSERT INTO chunk_fts (rowid, chunk_text, section_title, peripheral, register_name)
+				VALUES (?, ?, ?, ?, ?)
+			`, chunkID, c.text, c.section, c.peripheral, c.register); err != nil {
+				t.Fatalf("insert chunk_fts: %v", err)
+			}
 		}
 	}
 

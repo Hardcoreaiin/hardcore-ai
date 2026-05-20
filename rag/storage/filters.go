@@ -18,8 +18,14 @@ func BuildFilterSQL(opts SearchOptions) (clause string, args []interface{}) {
 	var conditions []string
 
 	if opts.ChipFamily != "" {
-		conditions = append(conditions, "d.chip_family = ?")
-		args = append(args, opts.ChipFamily)
+		family := opts.ChipFamily
+		hasDots := strings.Contains(family, ".")
+		family = strings.TrimRight(family, ".")
+		if strings.ToLower(family) == "stm32" || hasDots || family == "" {
+			family = family + "%"
+		}
+		conditions = append(conditions, "d.chip_family LIKE ?")
+		args = append(args, family)
 	}
 	if opts.ChipModel != "" {
 		conditions = append(conditions, "d.chip_model = ?")

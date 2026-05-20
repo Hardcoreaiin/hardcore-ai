@@ -4,12 +4,14 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/agent"
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/bubbles"
+	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/bus"
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/commands"
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/config"
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/pets"
@@ -20,6 +22,10 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"hardcoreai-rag/indexing"
+	"hardcoreai-rag/ingestion"
+	"hardcoreai-rag/storage"
 )
 
 type state int
@@ -28,25 +34,36 @@ const (
 	stateOnboarding state = iota
 	stateWelcome
 	stateChat
+	stateUpload
 )
+
+type RAGIngestEvent struct {
+	Stage string // "start", "progress", "done", "error"
+	File  string
+	Count int
+	Total int
+	Err   error
+}
 
 type Model struct {
 	ctx     context.Context
 	session *agent.Session
+	db      *storage.DB
+	bus     *bus.Bus
 
-	state    state
-	theme    *theme.Theme
-	root     string
-	user     string
-	version  string
-	trusted  bool
-	provider string
-	pet      string
-	petName  string
+	state        state
+	uploadBubble *bubbles.UploadBubble
+	theme        *theme.Theme
+	root         string
+	user         string
+	version      string
+	trusted      bool
+	provider     string
+	pet          string
+	petName      string
 
 	onboard *onboarding
 	welcome *bubbles.Welcome
-
 	chat      *bubbles.Chat
 	thought   *bubbles.Thought
 	petBubble *bubbles.PetBubble
@@ -93,6 +110,8 @@ type Options struct {
 	User     string
 	Version  string
 	Events   <-chan any
+	Bus      *bus.Bus
+	RAGDB    *storage.DB
 	Existing settings.Settings
 	Loaded   bool
 }
@@ -106,6 +125,8 @@ func New(ctx context.Context, session *agent.Session, opts Options) *Model {
 	m := &Model{
 		ctx:       ctx,
 		session:   session,
+		db:        opts.RAGDB,
+		bus:       opts.Bus,
 		root:      opts.Root,
 		user:      opts.User,
 		version:   opts.Version,
@@ -254,6 +275,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(textinput.Blink, tickCmd())
 		case stateChat:
 			return m.updateChat(msg)
+		case stateUpload:
+			return m.updateUpload(msg)
 		}
 
 	case tickMsg:
@@ -311,6 +334,30 @@ func (m *Model) updateOnboarding(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.popup = newCmdPopup(m.cmds)
 		m.persist()
 		m.enterWelcome()
+	}
+	return m, nil
+}
+
+func (m *Model) updateUpload(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.uploadBubble == nil {
+		m.state = stateChat
+		return m, nil
+	}
+	key := msg.String()
+	done, confirmed, files := m.uploadBubble.HandleKey(key)
+	if done {
+		m.state = stateChat
+		m.uploadBubble = nil
+		if confirmed {
+			if len(files) == 0 {
+				m.system = append(m.system, "RAG upload cancelled (no files selected)")
+			} else {
+				m.system = append(m.system, fmt.Sprintf("Confirmed upload of %d files. Ingesting in background...", len(files)))
+				go m.ingestFiles(files)
+			}
+		} else {
+			m.system = append(m.system, "RAG upload cancelled")
+		}
 	}
 	return m, nil
 }
@@ -553,6 +600,36 @@ func (m *Model) runCommand(input string) (quit bool) {
 		m.err = nil
 		m.showingVP = false
 	}
+	if res.StartUpload {
+		m.uploadBubble = bubbles.NewUploadBubble(m.theme, m.root)
+		m.state = stateUpload
+	}
+	if res.ClearRAGDB {
+		if m.db != nil {
+			m.db.Close()
+		}
+		dbPath, err := config.RAGDBPath()
+		if err != nil {
+			m.system = append(m.system, "error resolving RAG DB path: "+err.Error())
+		} else {
+			os.Remove(dbPath)
+			os.Remove(dbPath + "-wal")
+			os.Remove(dbPath + "-shm")
+
+			newDB, err := storage.NewDB(dbPath)
+			if err != nil {
+				m.system = append(m.system, "error re-initializing database: "+err.Error())
+			} else {
+				if m.db != nil {
+					m.db.DB = newDB.DB
+					m.db.HasFTS5 = newDB.HasFTS5
+				} else {
+					m.db = newDB
+				}
+				m.system = append(m.system, "✅ RAG database successfully cleared and re-initialized.")
+			}
+		}
+	}
 	if res.Message != "" {
 		m.system = append(m.system, res.Message)
 	}
@@ -666,6 +743,17 @@ func (m *Model) routeAppEvent(ev any) {
 		}
 		if e.Stage == "error" && e.Err != nil {
 			m.masonry.Console().Done(e.Err.Error(), true)
+		}
+	case RAGIngestEvent:
+		switch e.Stage {
+		case "start":
+			m.system = append(m.system, fmt.Sprintf("Starting ingestion of %d files...", e.Total))
+		case "progress":
+			m.system = append(m.system, fmt.Sprintf("[%d/%d] Successfully indexed: %s", e.Count, e.Total, e.File))
+		case "done":
+			m.system = append(m.system, fmt.Sprintf("✅ RAG ingestion complete! %d files are now indexed and searchable.", e.Total))
+		case "error":
+			m.system = append(m.system, fmt.Sprintf("❌ RAG ingestion error: %s", sanitizeError(e.Err)))
 		}
 	}
 }
@@ -823,6 +911,10 @@ func (m *Model) View() string {
 			Render("press any key to continue…")
 		content := lipgloss.JoinVertical(lipgloss.Center, m.welcome.View(m.width), hint)
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
+	case stateUpload:
+		if m.uploadBubble != nil {
+			return m.uploadBubble.View(m.width, m.height)
+		}
 	}
 	return m.chatView()
 }
@@ -1116,6 +1208,20 @@ func (m *Model) buildCommands() *commands.Registry {
 		Run:         func(args []string) commands.Result { return commands.Result{Quit: true} },
 	})
 	r.Register(&commands.Command{
+		Name:        "upload",
+		Description: "browse and upload PDF manuals to local RAG database",
+		Run: func(args []string) commands.Result {
+			return commands.Result{StartUpload: true}
+		},
+	})
+	r.Register(&commands.Command{
+		Name:        "clear-db",
+		Description: "completely clear and re-initialize the local RAG database",
+		Run: func(args []string) commands.Result {
+			return commands.Result{ClearRAGDB: true}
+		},
+	})
+	r.Register(&commands.Command{
 		Name:        "help",
 		Description: "list available commands",
 		Run: func(args []string) commands.Result {
@@ -1128,4 +1234,162 @@ func (m *Model) buildCommands() *commands.Registry {
 	})
 
 	return r
+}
+
+func (m *Model) ingestFiles(files []string) {
+	if m.bus == nil || m.db == nil {
+		return
+	}
+
+	dbPath, err := config.RAGDBPath()
+	if err != nil {
+		m.bus.Publish(RAGIngestEvent{Stage: "error", Err: fmt.Errorf("failed to get global RAG DB path: %w", err)})
+		return
+	}
+
+	m.bus.Publish(RAGIngestEvent{Stage: "start", Total: len(files)})
+
+	embedder := indexing.NewEmbedder()
+	indexer, err := indexing.NewIndexer(dbPath, embedder)
+	if err != nil {
+		m.bus.Publish(RAGIngestEvent{Stage: "error", Err: fmt.Errorf("failed to initialize indexer: %w", err)})
+		return
+	}
+	defer indexer.Close()
+
+	parser := ingestion.NewPDFParser()
+	chunker := ingestion.NewChunker()
+
+	for i, localPath := range files {
+		filename := filepath.Base(localPath)
+
+		// Metadata inference
+		docType := "document"
+		lowerName := strings.ToLower(filename)
+		if strings.Contains(lowerName, "reference_manual") || strings.Contains(lowerName, "rm") {
+			docType = "reference_manual"
+		} else if strings.Contains(lowerName, "datasheet") || strings.Contains(lowerName, "ds") {
+			docType = "datasheet"
+		} else if strings.Contains(lowerName, "programming_manual") || strings.Contains(lowerName, "pm") {
+			docType = "programming_manual"
+		}
+
+		chipFamily := "STM32"
+		if strings.Contains(lowerName, "stm32f4") {
+			chipFamily = "STM32F4"
+		} else if strings.Contains(lowerName, "stm32f7") {
+			chipFamily = "STM32F7"
+		} else if strings.Contains(lowerName, "stm32h7") {
+			chipFamily = "STM32H7"
+		}
+
+		chipModel := chipFamily
+		words := strings.FieldsFunc(lowerName, func(r rune) bool {
+			return r == '_' || r == '-' || r == '.' || r == ' '
+		})
+		for _, w := range words {
+			if strings.HasPrefix(w, "stm32") && len(w) > 7 {
+				chipModel = strings.ToUpper(w)
+				break
+			}
+		}
+
+		version := "v1.0"
+		for _, w := range words {
+			if (strings.HasPrefix(w, "rm") || strings.HasPrefix(w, "pm")) && len(w) == 6 {
+				version = strings.ToUpper(w)
+				break
+			}
+		}
+
+		// Delete any existing document with this ID to handle clean overwrites/re-indexing.
+		if err := m.db.DeleteDocument("local_" + filename); err != nil {
+			m.bus.Publish(RAGIngestEvent{Stage: "error", Err: fmt.Errorf("failed to clean existing document %s: %w", filename, err)})
+			continue
+		}
+
+		// Parse PDF
+		doc, err := parser.ParsePDF(localPath)
+		if err != nil {
+			m.bus.Publish(RAGIngestEvent{Stage: "error", Err: fmt.Errorf("failed to parse %s: %w", filename, err)})
+			continue
+		}
+
+		// Insert document record
+		docID, err := m.db.InsertDocument(storage.Document{
+			MongoID:    "local_" + filename,
+			Filename:   filename,
+			LocalPath:  localPath,
+			DocType:    docType,
+			ChipFamily: chipFamily,
+			ChipModel:  chipModel,
+			Version:    version,
+		})
+		if err != nil {
+			m.bus.Publish(RAGIngestEvent{Stage: "error", Err: fmt.Errorf("failed to insert document %s: %w", filename, err)})
+			continue
+		}
+
+		// Chunk
+		ingestionChunks := chunker.ChunkDocument(doc)
+
+		// Convert to storage chunks
+		storageChunks := make([]storage.Chunk, len(ingestionChunks))
+		for idx, c := range ingestionChunks {
+			storageChunks[idx] = storage.Chunk{
+				DocumentID:   int(docID),
+				ChunkText:    c.ChunkText,
+				SectionTitle: c.SectionTitle,
+				Peripheral:   c.Peripheral,
+				RegisterName: c.RegisterName,
+				PageNumber:   c.PageNumber,
+				TokenCount:   c.TokenCount,
+				ChunkIndex:   c.ChunkIndex,
+			}
+		}
+
+		// Insert chunks
+		chunkIDs, err := m.db.InsertChunksAndReturnIDs(storageChunks)
+		if err != nil {
+			m.db.UpdateDocumentStatus(docID, "failed", err.Error())
+			m.bus.Publish(RAGIngestEvent{Stage: "error", Err: fmt.Errorf("failed to insert chunks for %s: %w", filename, err)})
+			continue
+		}
+
+		// Extract texts
+		chunkTexts := make([]string, len(ingestionChunks))
+		for idx, c := range ingestionChunks {
+			chunkTexts[idx] = c.ChunkText
+		}
+
+		// Index embeddings
+		if err := indexer.IndexChunks(chunkIDs, chunkTexts); err != nil {
+			m.db.UpdateDocumentStatus(docID, "failed", err.Error())
+			m.bus.Publish(RAGIngestEvent{Stage: "error", Err: fmt.Errorf("failed to index embeddings for %s: %w", filename, err)})
+			continue
+		}
+
+		m.db.UpdateDocumentStatus(docID, "indexed", "")
+		m.bus.Publish(RAGIngestEvent{Stage: "progress", File: filename, Count: i + 1, Total: len(files)})
+	}
+
+	m.bus.Publish(RAGIngestEvent{Stage: "done", Total: len(files)})
+}
+
+func sanitizeError(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := err.Error()
+	var sb strings.Builder
+	for _, r := range s {
+		if r >= 32 && r < 127 {
+			sb.WriteRune(r)
+		} else if r == '\n' || r == '\t' || r == '\r' {
+			sb.WriteRune(' ')
+		} else {
+			sb.WriteRune('?')
+		}
+	}
+	return sb.String()
 }

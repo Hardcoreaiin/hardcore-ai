@@ -2,7 +2,6 @@ package indexing
 
 import (
 	"context"
-	"fmt"
 	"hash/fnv"
 	"math"
 	"math/rand"
@@ -35,7 +34,7 @@ func (e *Embedder) EmbedBatch(texts []string) ([][]float32, error) {
 	for i, text := range texts {
 		embeddings[i] = deterministicEmbedding(text)
 	}
-	fmt.Printf("Generated %d deterministic offline embeddings (dim=%d)\n", len(embeddings), EmbeddingDimension)
+	logInfo("Generated %d deterministic offline embeddings (dim=%d)\n", len(embeddings), EmbeddingDimension)
 	return embeddings, nil
 }
 
