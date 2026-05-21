@@ -21,6 +21,10 @@ import (
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/tools/embedded"
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/tui"
 	tea "github.com/charmbracelet/bubbletea"
+
+	"hardcoreai-rag/indexing"
+	"hardcoreai-rag/ingestion"
+	"hardcoreai-rag/storage"
 )
 
 const version = "v0.2.0"
@@ -58,7 +62,25 @@ func main() {
 	embedded.RegisterFlash(reg)
 	embedded.RegisterEmulate(reg, tcMgr)
 
+	storage.Verbose = false
+	ingestion.Verbose = false
+	indexing.Verbose = false
+
 	cfg := config.Load()
+	dbPath, err := config.RAGDBPath()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "failed to resolve global RAG db path:", err)
+		os.Exit(1)
+	}
+	db, err := storage.NewDB(dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "failed to initialize global RAG database:", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	embedded.RegisterRAGQuery(reg, db)
+
 	client := buildClient(cfg)
 	loop := agent.New(client, reg, agent.Config{})
 
@@ -98,6 +120,8 @@ func main() {
 		User:     currentUser(),
 		Version:  version,
 		Events:   appBus.Subscribe(),
+		Bus:      appBus,
+		RAGDB:    db,
 		Existing: existing,
 		Loaded:   loaded,
 	})

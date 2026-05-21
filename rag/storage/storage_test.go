@@ -35,8 +35,12 @@ func TestOpen_InMemory(t *testing.T) {
 		t.Fatalf("ApplySchema failed: %v", err)
 	}
 
-	// Verify all three tables were created.
-	for _, tbl := range []string{"documents", "chunks", "chunk_fts"} {
+	// Verify tables were created.
+	expectedTables := []string{"documents", "chunks"}
+	if db.HasFTS5 {
+		expectedTables = append(expectedTables, "chunk_fts")
+	}
+	for _, tbl := range expectedTables {
 		var name string
 		err := db.QueryRow(
 			"SELECT name FROM sqlite_master WHERE name = ?", tbl,

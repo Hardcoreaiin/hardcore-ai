@@ -25,7 +25,7 @@ This is not a generic chatbot backend. The entire pipeline is tuned for embedded
 |---|---|
 | **Ingestion Pipeline** | Dynamically scans the production `data/` directory for PDFs, parses them, splits them into semantically coherent chunks, and automatically infers metadata (type, family, model, version). |
 | **Offline Embedding Engine** | Generates deterministic 768-dimensional embeddings locally — no external API dependency at index or query time. |
-| **Hybrid Retrieval** | Runs in-Go cosine similarity search and SQLite FTS5 BM25 keyword search in parallel, then merges results using Reciprocal Rank Fusion (RRF, k=60). |
+| **Hybrid Retrieval** | Runs in-Go cosine similarity search and SQLite FTS5 BM25 keyword search in parallel, then merges results using Reciprocal Rank Fusion (RRF, k=60). Supports dynamic runtime FTS5 capability detection and falls back to standard SQL `LIKE` wildcard search if FTS5 is not compiled in the host's SQLite library. |
 | **Metadata Reranker** | Applies weighted additive scoring that boosts exact register matches (+0.30), peripheral matches (+0.20), section title overlap (+0.15), reference manual preference (+0.10), and chip family alignment (+0.05). |
 | **Token-Budgeted Context Builder** | Assembles a structured, traceable LLM-ready context string. Uses `cl100k_base` (tiktoken) to count tokens accurately and drops lowest-scoring chunks when the budget is exceeded. |
 | **Evaluation Framework** | Benchmarks retrieval quality against a JSON test suite. Reports Hit@K, Mean Reciprocal Rank (MRR), and Precision@K per query and in aggregate. |
@@ -35,7 +35,8 @@ This is not a generic chatbot backend. The entire pipeline is tuned for embedded
 
 - **Single Binary** — The entire retrieval stack compiles to one Go binary with zero Python runtime and zero external services.
 - **Local-First** — All embeddings, vectors, and FTS indexes live in a single `SQLite` file (`data/rag.db`) on disk. No cloud retrieval latency.
-- **Domain-Aware Retrieval** — FTS5 is not an afterthought. STM32 docs contain register names (`USART_BRR`), macros, and hex addresses that embedding models alone handle poorly. Hybrid retrieval is load-bearing.
+- **Dynamic FTS5 Detection & Fallback** — Automatically checks if the SQLite library supports the FTS5 module at runtime. If unsupported, the system skips virtual table schemas and falls back to SQL `LIKE` wildcard matching. Compilation and tests run cleanly both with and without the `sqlite_fts5` build tag.
+- **Domain-Aware Retrieval** — FTS5 (or `LIKE` fallback) is not an afterthought. STM32 docs contain register names (`USART_BRR`), macros, and hex addresses that embedding models alone handle poorly. Hybrid retrieval is load-bearing.
 - **Reranking Over Raw Similarity** — The reranker is where relevance is determined. Semantic similarity is a starting signal, not the answer.
 - **Evaluation-First** — `evaluation/test_queries.json` defines expected peripheral, register, and section matches. Run `rag-cli eval` to catch retrieval regressions before they reach the LLM.
 

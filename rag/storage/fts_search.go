@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"unicode"
 )
@@ -82,6 +83,10 @@ func (db *DB) FTSSearch(ctx context.Context, query string, opts SearchOptions) (
 	clean := sanitizeFTSQuery(query)
 	if clean == "" {
 		return []SearchResult{}, nil
+	}
+
+	if !db.HasFTS5 {
+		return db.FallbackLikeSearch(ctx, clean, opts)
 	}
 
 	fetchK := opts.K
@@ -172,6 +177,138 @@ func (db *DB) FTSSearch(ctx context.Context, query string, opts SearchOptions) (
 		}
 	}
 
+	if opts.K > 0 && len(results) > opts.K {
+		results = results[:opts.K]
+	}
+
+	return results, nil
+}
+
+// FallbackLikeSearch performs a standard SQL LIKE query against chunks as a fallback
+// when SQLite FTS5 extension is not enabled.
+func (db *DB) FallbackLikeSearch(ctx context.Context, cleanQuery string, opts SearchOptions) ([]SearchResult, error) {
+	terms := strings.Split(cleanQuery, " OR ")
+	if len(terms) == 0 {
+		return []SearchResult{}, nil
+	}
+
+	filterClause, filterArgs := BuildFilterSQL(opts)
+
+	var likeConditions []string
+	var likeArgs []interface{}
+	for _, term := range terms {
+		t := strings.TrimSpace(term)
+		if t != "" {
+			likeConditions = append(likeConditions, "c.chunk_text LIKE ?")
+			likeArgs = append(likeArgs, "%"+t+"%")
+		}
+	}
+
+	if len(likeConditions) == 0 {
+		return []SearchResult{}, nil
+	}
+
+	likeClause := "(" + strings.Join(likeConditions, " OR ") + ")"
+
+	query := `
+		SELECT
+			c.id, c.document_id, c.chunk_text, c.section_title,
+			c.peripheral, c.register_name, c.page_number, c.chunk_index,
+			d.filename, d.doc_type, d.chip_family, d.chip_model
+		FROM chunks c
+		JOIN documents d ON d.id = c.document_id
+		WHERE ` + likeClause
+	
+	if filterClause != "" {
+		query += " AND " + filterClause + "\n"
+	}
+	
+	fetchK := opts.K
+	if fetchK <= 0 {
+		fetchK = 10
+	}
+	
+	// Over-fetch more candidates to rank by relevance in Go memory
+	fetchLimit := fetchK * 10
+	if fetchLimit < 100 {
+		fetchLimit = 100
+	}
+	
+	query += " LIMIT ?"
+
+	args := append(likeArgs, filterArgs...)
+	args = append(args, fetchLimit)
+
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("storage.FallbackLikeSearch: query failed: %w", err)
+	}
+	defer rows.Close()
+
+	var results []SearchResult
+	for rows.Next() {
+		var r SearchResult
+		if err := rows.Scan(
+			&r.ChunkID, &r.DocumentID, &r.ChunkText, &r.SectionTitle,
+			&r.Peripheral, &r.RegisterName, &r.PageNumber, &r.ChunkIndex,
+			&r.Filename, &r.DocType, &r.ChipFamily, &r.ChipModel,
+		); err != nil {
+			return nil, fmt.Errorf("storage.FallbackLikeSearch: scan row: %w", err)
+		}
+
+		// Calculate occurrences of terms to score relevance in memory
+		textLower := strings.ToLower(r.ChunkText)
+		secLower := strings.ToLower(r.SectionTitle)
+		regLower := strings.ToLower(r.RegisterName)
+		periLower := strings.ToLower(r.Peripheral)
+
+		var matchCount int
+		var termRatio float64
+		for _, term := range terms {
+			t := strings.ToLower(strings.TrimSpace(term))
+			if t == "" {
+				continue
+			}
+			cnt := strings.Count(textLower, t)
+			cnt += strings.Count(secLower, t) * 5
+			cnt += strings.Count(regLower, t) * 10
+			cnt += strings.Count(periLower, t) * 5
+
+			if cnt > 0 {
+				matchCount += cnt
+				termRatio += 1.0
+			}
+		}
+
+		// Score ranks distinct terms matched, then count of occurrences
+		r.FTSScore = termRatio*10.0 + float64(matchCount)*0.1
+		results = append(results, r)
+	}
+	
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage.FallbackLikeSearch: rows error: %w", err)
+	}
+
+	// Sort results descending by score
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].FTSScore > results[j].FTSScore
+	})
+
+	// Normalize scores to [0.0, 1.0]
+	if len(results) > 0 {
+		minScore := results[len(results)-1].FTSScore
+		maxScore := results[0].FTSScore
+		spread := maxScore - minScore
+		for i := range results {
+			if spread < 1e-9 {
+				results[i].FTSScore = 1.0
+			} else {
+				results[i].FTSScore = (results[i].FTSScore - minScore) / spread
+			}
+		}
+	}
+
+	// Truncate to final requested K
 	if opts.K > 0 && len(results) > opts.K {
 		results = results[:opts.K]
 	}

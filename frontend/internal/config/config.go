@@ -3,6 +3,7 @@ package config
 import (
 	"bufio"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/llm"
@@ -98,4 +99,17 @@ func loadDotEnv(path string) {
 			os.Setenv(key, val)
 		}
 	}
+}
+
+// RAGDBPath returns the global RAG SQLite database path (~/.hardcore-ai/rag.db)
+func RAGDBPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(home, ".hardcore-ai")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "rag.db"), nil
 }

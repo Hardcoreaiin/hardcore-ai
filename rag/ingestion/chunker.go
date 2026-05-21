@@ -1,7 +1,6 @@
-﻿package ingestion
+package ingestion
 
 import (
-	"fmt"
 	"regexp"
 	"strings"
 )
@@ -47,7 +46,7 @@ var registerNameRegex = regexp.MustCompile(`\b([A-Z]{2,10}_[A-Z][A-Z0-9_]{2,20})
 var pageMarkerRegex = regexp.MustCompile(`DS\d+\s+Rev\s+\d+\s*\d+/\d+`)
 
 func (c *Chunker) ChunkDocument(doc *ParsedDocument) []Chunk {
-	fmt.Printf("✂️  Chunking %d pages...\n", len(doc.Pages))
+	logInfo("✂️  Chunking %d pages...\n", len(doc.Pages))
 
 	var chunks []Chunk
 	chunkIndex := 0
@@ -65,7 +64,7 @@ func (c *Chunker) ChunkDocument(doc *ParsedDocument) []Chunk {
 		chunkIndex += len(pageChunks)
 	}
 
-	fmt.Printf("✅ Created %d chunks\n", len(chunks))
+	logInfo("✅ Created %d chunks\n", len(chunks))
 	return chunks
 }
 

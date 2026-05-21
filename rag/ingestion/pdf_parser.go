@@ -23,6 +23,14 @@ type ParsedPage struct {
 
 type PDFParser struct{}
 
+var Verbose = true
+
+func logInfo(format string, args ...any) {
+	if Verbose {
+		fmt.Printf(format, args...)
+	}
+}
+
 func NewPDFParser() *PDFParser {
 	return &PDFParser{}
 }
@@ -40,7 +48,7 @@ func (p *PDFParser) ParsePDF(pdfPath string) (*ParsedDocument, error) {
 	defer f.Close()
 
 	totalPages := r.NumPage()
-	fmt.Printf("📄 Parsing %s (%d pages)...\n", pdfPath, totalPages)
+	logInfo("📄 Parsing %s (%d pages)...\n", pdfPath, totalPages)
 
 	doc := &ParsedDocument{
 		Filename:   pdfPath,
@@ -58,7 +66,7 @@ func (p *PDFParser) ParsePDF(pdfPath string) (*ParsedDocument, error) {
 
 		text, err := page.GetPlainText(nil)
 		if err != nil {
-			fmt.Printf("  ⚠️  Warning: failed to extract page %d: %v\n", pageNum, err)
+			logInfo("  ⚠️  Warning: failed to extract page %d: %v\n", pageNum, err)
 			continue
 		}
 
@@ -78,7 +86,7 @@ func (p *PDFParser) ParsePDF(pdfPath string) (*ParsedDocument, error) {
 	}
 
 	doc.RawText = fullText.String()
-	fmt.Printf("✅ Parsed %d pages, extracted %d characters\n", len(doc.Pages), len(doc.RawText))
+	logInfo("✅ Parsed %d pages, extracted %d characters\n", len(doc.Pages), len(doc.RawText))
 
 	return doc, nil
 }
