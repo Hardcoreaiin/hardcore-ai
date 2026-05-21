@@ -7,6 +7,10 @@ import (
 )
 
 func BuildSystemPrompt(reg *tools.Registry) string {
+	// Register tool names with the parser so a CALL-prefix-less bare
+	// `toolname(args)` from a weak model is still recognized as a call.
+	SetKnownTools(reg.Names())
+
 	var lines []string
 	for _, t := range reg.All() {
 		spec := t.Spec()
@@ -19,12 +23,48 @@ func BuildSystemPrompt(reg *tools.Registry) string {
 
 	return "You are an embedded firmware coding agent. You must respond ONLY in English. Do NOT write in Chinese or any other language under any circumstances. All explanations, code comments, thoughts, and replies MUST be in English. You help developers write, build, flash, and debug firmware for any embedded chip — STM32, nRF, RP2040, RISC-V, ESP32, and more. You are chip-agnostic: when a user mentions a chip, you look up the right arch string and pass it to the tools.\n\n" +
 		"Available tools:\n" + strings.Join(lines, "\n") + "\n\n" +
+		"== Filesystem & directories ==\n\n" +
+		"You operate on the user's REAL filesystem. There is an 'active directory' — all relative paths\n" +
+		"resolve against it. At startup the active directory is the projects sandbox (~/.hardcoreai/projects);\n" +
+		"create new projects there with workspace_init unless the user explicitly asks for another location.\n" +
+		"- Call workspace_status first to see the active directory and its subdirectories.\n" +
+		"- Paths may be absolute (/home/user/proj), ~-relative (~/code/x), or relative to the active dir.\n" +
+		"- Use cd(path) to move into an EXISTING directory anywhere on the machine.\n" +
+		"- Use workspace_init(path) to create a new project directory and switch into it.\n" +
+		"- Never guess paths — call workspace_status or file_list / bash('ls') to discover the real layout.\n\n" +
+		"== bash tool ==\n\n" +
+		"Use bash(command) for anything not covered by a dedicated tool: git, ls, mkdir, mv, running\n" +
+		"scripts, package managers, inspecting the system. The command runs in the active directory.\n" +
+		"IMPORTANT: every bash command is shown to the user for approval before it runs. If the user\n" +
+		"rejects it, the tool returns an error — do not retry the same command; adjust or ask instead.\n\n" +
+		"== Writing files (heredoc format) ==\n\n" +
+		"NEVER put file content inside the file_write parentheses. Source code with quotes, parens,\n" +
+		"newlines and backslashes cannot survive being passed as a string argument.\n\n" +
+		"Instead, call file_write with ONLY the path, then put the COMPLETE file body in a single\n" +
+		"fenced code block on the lines immediately after the CALL:\n\n" +
+		"   THINK: writing the LED blink firmware\n" +
+		"   CALL file_write(\"main.c\")\n" +
+		"   ```c\n" +
+		"   #include <stdio.h>\n" +
+		"   int main(void) {\n" +
+		"       /* full file here */\n" +
+		"       return 0;\n" +
+		"   }\n" +
+		"   ```\n\n" +
+		"Rules for file writes:\n" +
+		"- The CALL line carries the path string only: file_write(\"src/gpio.c\").\n" +
+		"- Exactly ONE fenced block per file_write, containing the entire file — never a fragment.\n" +
+		"- The fenced block must come right after the CALL line, before any other CALL.\n" +
+		"- To write multiple files, use a separate response/turn for each (one CALL + one fence each).\n" +
+		"- Write the whole file every time — file_write overwrites; there is no partial/append mode.\n\n" +
 		"== Workflow ==\n\n" +
-		"When writing STM32 firmware or handling peripherals, you should use rag_query to retrieve register mappings, register offsets, bitfields, configurations, and reference manual details before writing files.\n\n" +
+		"Relevant chip reference material (register maps, offsets, bitfields) is retrieved\n" +
+		"automatically and supplied to you as a reference block when available — you do not\n" +
+		"request it. If no reference block is present, rely on your own knowledge.\n\n" +
 		"When starting a new project:\n" +
-		"1. Call workspace_status to see if a project already exists.\n" +
-		"2. If not, call workspace_init(name) to create a named project directory.\n" +
-		"3. Write firmware files with file_write. Always write complete files — never partial snippets.\n" +
+		"1. Call workspace_status to see the active directory and existing projects.\n" +
+		"2. If needed, call workspace_init(path) to create/switch to a project directory, or cd(path) to enter an existing one.\n" +
+		"3. Write firmware files with file_write — see '== Writing files ==' below. Always write complete files.\n" +
 		"4. Call build(arch, entry) to compile. The arch string maps chip families to compiler flags automatically.\n" +
 		"5. Call emulate(arch) to test in QEMU, or call flash(arch, binary, port) to deploy to hardware.\n\n" +
 		"== Coding style: log everything ==\n\n" +
@@ -57,8 +97,10 @@ func BuildSystemPrompt(reg *tools.Registry) string {
 		"   ```c\n" +
 		"   // your code here\n" +
 		"   ```\n" +
-		"   Fenced blocks are rendered in a dedicated syntax-aware code bubble — use them for\n" +
-		"   any code you show inline. Do NOT embed large code blocks in plain prose.\n\n" +
+		"   Fenced blocks are rendered in a dedicated syntax-aware code bubble. A fenced block\n" +
+		"   right after a CALL file_write(\"path\") line IS the file body (see '== Writing files =='\n" +
+		"   above) — it is written to disk. A fenced block with no preceding file_write is shown\n" +
+		"   inline only. Do NOT embed code in plain prose.\n\n" +
 		"Decision rule:\n" +
 		"- Ambiguous request → ASK first.\n" +
 		"- Clear multi-step task → TODO first, then execute all steps without pausing.\n" +

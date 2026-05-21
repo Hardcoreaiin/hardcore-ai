@@ -54,10 +54,12 @@ func main() {
 	}
 	embedded.RegisterWorkspaceInit(reg)
 	embedded.RegisterWorkspaceStatus(reg)
+	embedded.RegisterCD(reg)
 	embedded.RegisterFileWrite(reg)
 	embedded.RegisterFileRead(reg)
 	embedded.RegisterFileList(reg)
 	embedded.RegisterFileSearch(reg)
+	embedded.RegisterBash(reg)
 	embedded.RegisterBuild(reg, tcMgr)
 	embedded.RegisterFlash(reg)
 	embedded.RegisterEmulate(reg, tcMgr)
@@ -79,13 +81,33 @@ func main() {
 	}
 	defer db.Close()
 
-	embedded.RegisterRAGQuery(reg, db)
-
 	client := buildClient(cfg)
 	loop := agent.New(client, reg, agent.Config{})
 
+	// RAG is automatic, not an LLM tool: the loop queries the retriever at the
+	// start of each turn and injects any hits as hidden context. The model
+	// never calls it and never sees "no documentation found".
+	if ret := embedded.NewRAGRetriever(db); ret != nil {
+		loop.SetRetriever(ret)
+	}
+
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "cwd error:", err)
+		os.Exit(1)
+	}
+	// The agent's active directory starts in a dedicated projects sandbox
+	// (~/.hardcoreai/projects) so it never modifies the directory the app was
+	// launched from. Fall back to the launch cwd if the sandbox can't be set up.
+	projectsDir, err := embedded.DefaultProjectsDir()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "projects dir error, using cwd:", err)
+		projectsDir = cwd
+	}
+	embedded.SetWorkspaceRoot(projectsDir)
 
 	if headless {
 		prompt := strings.Join(keep, " ")
@@ -95,12 +117,6 @@ func main() {
 		}
 		runHeadless(ctx, loop, prompt)
 		return
-	}
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "cwd error:", err)
-		os.Exit(1)
 	}
 
 	existing, loaded := loadSettings(cwd)

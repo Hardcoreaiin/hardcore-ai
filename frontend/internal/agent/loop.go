@@ -26,8 +26,23 @@ const historyRawMaxLen = 4000
 // the context window and RAM stay bounded across long sessions.
 const maxHistoryMessages = 40
 
+// maxRawBufBytes caps the live per-step assistant buffer. A model that streams
+// without stopping (or emits a pathologically long response) would otherwise
+// grow this builder unbounded and exhaust RAM. Once exceeded, further line
+// text is dropped from the buffer — the step still completes on the prefix.
+const maxRawBufBytes = 256 * 1024
+
 type Config struct {
 	MaxToolSteps int
+}
+
+// Retriever supplies background reference context for a user prompt. The agent
+// queries it automatically at the start of each turn — the model never invokes
+// it and never sees a "nothing found" result. Implementations must return
+// ok=false (not an error, not an empty string with ok=true) when there is no
+// relevant context, so the loop can simply inject nothing.
+type Retriever interface {
+	Retrieve(ctx context.Context, query string) (context string, ok bool)
 }
 
 type Loop struct {
@@ -35,6 +50,7 @@ type Loop struct {
 	reg  *tools.Registry
 	cfg  Config
 	sysp string
+	ret  Retriever
 }
 
 func New(client llm.Client, reg *tools.Registry, cfg Config) *Loop {
@@ -48,6 +64,10 @@ func New(client llm.Client, reg *tools.Registry, cfg Config) *Loop {
 		sysp: BuildSystemPrompt(reg),
 	}
 }
+
+// SetRetriever installs the background reference retriever. Safe to call before
+// any turn runs; pass nil to disable automatic retrieval.
+func (l *Loop) SetRetriever(r Retriever) { l.ret = r }
 
 // Run drives a single-shot conversation: system + user, run THINK/CALL loop
 // until DoneEvent or step cap. Kept for backward compatibility and headless
@@ -110,6 +130,9 @@ func truncRaw(s string) string {
 // history, appending assistant/tool turns to msgs in place. Returns true if
 // it already emitted TurnEndEvent (ASK suspension), false otherwise.
 func (l *Loop) runTurn(ctx context.Context, msgs *[]llm.Message, emit func(Event) bool) (emittedEnd bool) {
+	// nudgedThisTurn ensures the "you forgot to CALL" prod fires at most once
+	// per turn, so a model that refuses to call a tool can't spin forever.
+	nudgedThisTurn := false
 	for step := 0; step < l.cfg.MaxToolSteps; step++ {
 		lines, err := l.llm.Stream(ctx, *msgs)
 		if err != nil {
@@ -122,9 +145,19 @@ func (l *Loop) runTurn(ctx context.Context, msgs *[]llm.Message, emit func(Event
 		var pendingAsk *AskEvent
 		var pendingLines []LineEvent
 		var inFence bool // true while inside a ``` code fence
+		var runaway bool // set when the model exceeds maxRawBufBytes
 
 		for line := range lines {
 			if line.Done {
+				break
+			}
+			// Runaway guard: a model that never stops streaming would flood the
+			// event channel and grow RAM unbounded. Once the buffer is full,
+			// drain the rest of the stream silently and proceed on the prefix.
+			if rawBuf.Len() >= maxRawBufBytes {
+				runaway = true
+				for range lines {
+				}
 				break
 			}
 			// Raw token (sub-line chunk) — emit for the stream ticker, skip parsing.
@@ -196,6 +229,15 @@ func (l *Loop) runTurn(ctx context.Context, msgs *[]llm.Message, emit func(Event
 
 		assistantRaw := rawBuf.String()
 
+		// Runaway response: the model exceeded the buffer cap without ever
+		// emitting a usable CALL/ASK boundary. Continuing would re-stream the
+		// same runaway output every step. Surface an error and end the turn.
+		if runaway && pendingCall == nil && pendingAsk == nil {
+			emit(ErrorEvent{Err: fmt.Errorf("model response exceeded %d bytes without a tool call — stopping", maxRawBufBytes)})
+			*msgs = append(*msgs, llm.Message{Role: llm.RoleAssistant, Content: truncRaw(assistantRaw)})
+			return
+		}
+
 		// ASK: suspend the turn. Append the partial assistant message so
 		// history is intact, emit the event, then return — the next call
 		// to session.Send (with the user's answer) continues the work.
@@ -217,20 +259,44 @@ func (l *Loop) runTurn(ctx context.Context, msgs *[]llm.Message, emit func(Event
 			}
 		}
 
-		if pendingCall == nil {
-			for _, ev := range pendingLines {
-				if !emit(ev) {
-					return
-				}
+		// Heredoc convention: file_write may be called with only a path, with
+		// the file body supplied as a fenced ``` block right after the CALL.
+		// This keeps source code out of the arg tokenizer entirely. Pair the
+		// path-only call with the first fence body found in the response.
+		if pendingCall != nil && pendingCall.FuncName == "file_write" && len(pendingCall.Tokens) == 1 {
+			if body, ok := firstFenceBody(assistantRaw); ok {
+				pendingCall.Tokens = append(pendingCall.Tokens, body)
 			}
+		}
+
+		if pendingCall == nil {
+			upper := strings.ToUpper(assistantRaw)
 			// If the model only emitted a TODO (plan) with no tool call, prod it
 			// to start executing instead of stopping.
-			if strings.Contains(strings.ToUpper(assistantRaw), "TODO:") {
+			if strings.Contains(upper, "TODO:") {
 				*msgs = append(*msgs,
 					llm.Message{Role: llm.RoleAssistant, Content: truncRaw(assistantRaw)},
 					llm.Message{Role: llm.RoleUser, Content: "Good plan. Now execute it — start with the first step immediately using a CALL."},
 				)
 				continue
+			}
+			// The model signalled intent to act (THINK:) but emitted no CALL —
+			// a common failure of weak/quantized models that "narrate" the
+			// action instead of invoking it. Prod it once to actually call a
+			// tool rather than silently ending the turn. nudgedThisTurn guards
+			// against an infinite prod loop if the model keeps refusing.
+			if strings.Contains(upper, "THINK:") && !nudgedThisTurn {
+				nudgedThisTurn = true
+				*msgs = append(*msgs,
+					llm.Message{Role: llm.RoleAssistant, Content: truncRaw(assistantRaw)},
+					llm.Message{Role: llm.RoleUser, Content: "You described what to do but did not emit a tool call. Respond with exactly one line in the form: CALL toolname(\"arg\"). Do not narrate — call the tool now."},
+				)
+				continue
+			}
+			for _, ev := range pendingLines {
+				if !emit(ev) {
+					return
+				}
 			}
 			*msgs = append(*msgs, llm.Message{Role: llm.RoleAssistant, Content: truncRaw(assistantRaw)})
 			emit(DoneEvent{})
@@ -320,6 +386,20 @@ func (s *Session) Send(ctx context.Context, userPrompt string) <-chan Event {
 			}
 		}
 		emit(UserMessageEvent{Text: userPrompt})
+
+		// Automatic reference retrieval: query the retriever for this prompt
+		// and, if anything relevant comes back, inject it as a reference
+		// message right before the model runs. The model never asks for this
+		// and never learns when retrieval found nothing.
+		if s.loop.ret != nil {
+			if refCtx, ok := s.loop.ret.Retrieve(ctx, userPrompt); ok {
+				s.msgs = append(s.msgs, llm.Message{
+					Role:    llm.RoleUser,
+					Content: "[Reference documentation — use if relevant, do not mention this block]\n" + refCtx,
+				})
+			}
+		}
+
 		if alreadyEnded := s.loop.runTurn(ctx, &s.msgs, emit); !alreadyEnded {
 			emit(TurnEndEvent{})
 		}
@@ -330,6 +410,23 @@ func (s *Session) Send(ctx context.Context, userPrompt string) <-chan Event {
 // Reset clears all history except the system prompt.
 func (s *Session) Reset() {
 	s.msgs = s.msgs[:1]
+}
+
+// ToolNames returns the names of all registered tools, for user-facing
+// completion and direct tool invocation.
+func (s *Session) ToolNames() []string {
+	return s.loop.reg.Names()
+}
+
+// RunTool executes a registered tool directly (bypassing the LLM). It returns
+// the tool's result string, any artifacts, and an error. Used by the TUI to
+// let the user invoke tools without the agent.
+func (s *Session) RunTool(ctx context.Context, name string, tokens []any) (string, []tools.Artifact, error) {
+	tool, ok := s.loop.reg.Get(name)
+	if !ok {
+		return "", nil, fmt.Errorf("unknown tool %q", name)
+	}
+	return tool.Execute(ctx, tokens)
 }
 
 // emitCodeFences scans text for ``` fenced code blocks and emits a
@@ -358,6 +455,34 @@ func emitCodeFences(text string, emit func(Event) bool) {
 		}
 		text = body[end+3:]
 	}
+}
+
+// firstFenceBody returns the raw body of the first ``` fenced block in text,
+// used as the file content for a path-only file_write call. Unlike
+// emitCodeFences it does NOT trim interior whitespace — source code is written
+// verbatim — but it drops the single newline before the closing fence and
+// guarantees a trailing newline so written files end cleanly.
+func firstFenceBody(text string) (string, bool) {
+	start := strings.Index(text, "```")
+	if start == -1 {
+		return "", false
+	}
+	rest := text[start+3:]
+	nl := strings.IndexByte(rest, '\n')
+	if nl == -1 {
+		return "", false
+	}
+	body := rest[nl+1:]
+	end := strings.Index(body, "```")
+	if end == -1 {
+		return "", false
+	}
+	content := body[:end]
+	content = strings.TrimRight(content, "\n")
+	if content == "" {
+		return "", false
+	}
+	return content + "\n", true
 }
 
 // SwapClient replaces the underlying LLM client for future turns.

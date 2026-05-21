@@ -42,6 +42,14 @@ type Result struct {
 	// ClearRAGDB signals that the local RAG SQLite database should be deleted and recreated.
 	ClearRAGDB bool
 
+	// NewActiveDir, when non-empty, is the absolute path the active directory
+	// was just changed to (via /cd). The caller updates project-aware bubbles.
+	NewActiveDir string
+
+	// SpawnBubble, when non-empty, names a masonry bubble kind the caller
+	// should create (via /bubble): code, filetree, console, buildstatus.
+	SpawnBubble string
+
 	// Err non-nil signals the user-facing error to render.
 	Err error
 }

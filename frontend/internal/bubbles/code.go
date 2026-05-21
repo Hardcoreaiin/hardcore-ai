@@ -81,6 +81,7 @@ func NewCodeBubble(t *theme.Theme) *CodeBubble {
 func (b *CodeBubble) Title() string           { return "code" }
 func (b *CodeBubble) SetTheme(t *theme.Theme) { b.theme = t }
 func (b *CodeBubble) HasContent() bool        { return b.content != "" }
+func (b *CodeBubble) Content() string         { return b.content }
 
 func (b *CodeBubble) Update(path, content string) {
 	b.path = path

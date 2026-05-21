@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/tools"
@@ -14,30 +13,25 @@ type workspaceStatusArgs struct{}
 
 func RegisterWorkspaceStatus(r *tools.Registry) {
 	tools.Register(r, "workspace_status",
-		"Show the current project directory and list all existing projects in the workspace root. Use this at the start of a conversation to check what already exists.",
+		"Show the current active directory and list its immediate subdirectories. Use this at the start of a conversation to see where you are and what project directories exist.",
 		func(_ context.Context, _ workspaceStatusArgs) (string, []tools.Artifact, error) {
-			home, err := os.UserHomeDir()
+			dir, err := WorkspaceDir()
 			if err != nil {
 				return "", nil, err
 			}
-			root := filepath.Join(home, ".hardcoreai", "workspace")
-			if err := os.MkdirAll(root, 0o755); err != nil {
-				return "", nil, err
-			}
-			entries, err := os.ReadDir(root)
+			entries, err := os.ReadDir(dir)
 			if err != nil {
 				return "", nil, err
 			}
-			var projects []string
+			var subdirs []string
 			for _, e := range entries {
-				if e.IsDir() {
-					projects = append(projects, e.Name())
+				if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
+					subdirs = append(subdirs, e.Name())
 				}
 			}
-			current := CurrentProjectName()
-			if len(projects) == 0 {
-				return fmt.Sprintf("current project: %s  (no projects yet)", current), nil, nil
+			if len(subdirs) == 0 {
+				return fmt.Sprintf("current directory: %s\n(no subdirectories)", dir), nil, nil
 			}
-			return fmt.Sprintf("current project: %s\nall projects: %s", current, strings.Join(projects, ", ")), nil, nil
+			return fmt.Sprintf("current directory: %s\nsubdirectories: %s", dir, strings.Join(subdirs, ", ")), nil, nil
 		})
 }

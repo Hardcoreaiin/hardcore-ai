@@ -140,7 +140,9 @@ func (m *MasonryManager) SetTheme(t *theme.Theme) {
 	}
 }
 
-// FocusNext cycles keyboard focus to the next active bubble.
+// FocusNext cycles keyboard focus to the next active bubble. After the last
+// bubble it cycles to an unfocused state (control returns to the input), then
+// back to the first bubble — so tab alone can both enter and leave the panel.
 func (m *MasonryManager) FocusNext() {
 	live := m.active()
 	if len(live) == 0 {
@@ -156,10 +158,16 @@ func (m *MasonryManager) FocusNext() {
 	for _, e := range live {
 		e.focused = false
 	}
-	live[(cur+1)%len(live)].focused = true
+	// next index in range [0, len]; len means "no focus".
+	next := cur + 1
+	if next >= len(live) {
+		return // unfocused state
+	}
+	live[next].focused = true
 }
 
-// FocusPrev cycles keyboard focus to the previous active bubble.
+// FocusPrev cycles keyboard focus to the previous active bubble, including an
+// unfocused state so shift+tab can also leave the panel.
 func (m *MasonryManager) FocusPrev() {
 	live := m.active()
 	if len(live) == 0 {
@@ -175,7 +183,14 @@ func (m *MasonryManager) FocusPrev() {
 	for _, e := range live {
 		e.focused = false
 	}
-	live[(cur-1+len(live))%len(live)].focused = true
+	if cur <= 0 {
+		if cur == 0 {
+			return // step from first bubble to unfocused state
+		}
+		live[len(live)-1].focused = true // from unfocused, wrap to last
+		return
+	}
+	live[cur-1].focused = true
 }
 
 // AnyFocused reports whether any active bubble currently has keyboard focus.

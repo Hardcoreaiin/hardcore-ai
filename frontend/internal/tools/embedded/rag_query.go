@@ -2,49 +2,56 @@ package embedded
 
 import (
 	"context"
-	"fmt"
-	"os"
-
-	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/tools"
+	"strings"
 
 	"hardcoreai-rag/indexing"
 	"hardcoreai-rag/retrieval"
 	"hardcoreai-rag/storage"
 )
 
-type ragQueryArgs struct {
-	Query      string `tool:"query" desc:"semantic search query for STM32 reference manuals and datasheets"`
-	ChipFamily string `tool:"chip_family" desc:"optional filter by chip family (e.g. STM32F4, STM32F7, STM32H7). Use empty string if not filtering."`
+// RAGRetriever performs automatic background reference retrieval. It is not an
+// LLM-callable tool: the agent loop queries it at the start of each turn and
+// injects any result as hidden context. When nothing relevant is found it
+// returns ok=false so the model never sees a "no documentation" message.
+//
+// It satisfies the agent.Retriever interface structurally.
+type RAGRetriever struct {
+	db     *storage.DB
+	engine *retrieval.Engine
 }
 
-func RegisterRAGQuery(r *tools.Registry, db *storage.DB) {
-	tools.Register(r, "rag_query",
-		"Perform semantic search query across all ingested STM32 manuals/datasheets to retrieve technical reference information (e.g. register descriptions, offset, configurations).",
-		func(ctx context.Context, a ragQueryArgs) (string, []tools.Artifact, error) {
-			if db == nil {
-				return "Error: RAG database is not initialized.", nil, nil
-			}
+// NewRAGRetriever builds a retriever over the given RAG database. Returns nil
+// when db is nil so callers can simply skip installing it.
+func NewRAGRetriever(db *storage.DB) *RAGRetriever {
+	if db == nil {
+		return nil
+	}
+	return &RAGRetriever{
+		db:     db,
+		engine: retrieval.NewEngine(db, indexing.NewEmbedder()),
+	}
+}
 
-			embedder := indexing.NewEmbedder()
-			engine := retrieval.NewEngine(db, embedder)
+// Retrieve runs a hybrid search for the prompt and returns assembled context.
+// ok is false when the database is unavailable, the search errors, or no
+// chunks match — in every one of those cases the caller injects nothing.
+func (r *RAGRetriever) Retrieve(ctx context.Context, query string) (string, bool) {
+	if r == nil || r.engine == nil {
+		return "", false
+	}
+	if strings.TrimSpace(query) == "" {
+		return "", false
+	}
 
-			opts := retrieval.RetrievalOptions{
-				K:          3,
-				ChipFamily: a.ChipFamily,
-				MaxTokens:  3000,
-			}
-
-			res, err := engine.Retrieve(ctx, a.Query, opts)
-			if err != nil {
-				// Write the error to a file in the workspace
-				_ = os.WriteFile("rag_error.log", []byte(fmt.Sprintf("Query: %q, ChipFamily: %q, Err: %v\n", a.Query, a.ChipFamily, err)), 0644)
-				return "", nil, fmt.Errorf("rag query failed: %w", err)
-			}
-
-			if len(res.Chunks) == 0 {
-				return "No relevant documentation found for query: " + a.Query, nil, nil
-			}
-
-			return res.Context, nil, nil
-		})
+	res, err := r.engine.Retrieve(ctx, query, retrieval.RetrievalOptions{
+		K:         3,
+		MaxTokens: 3000,
+	})
+	if err != nil || res == nil || len(res.Chunks) == 0 {
+		return "", false
+	}
+	if strings.TrimSpace(res.Context) == "" {
+		return "", false
+	}
+	return res.Context, true
 }

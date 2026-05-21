@@ -18,6 +18,7 @@ import (
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/settings"
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/theme"
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/toolchain"
+	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/tools/embedded"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -62,8 +63,8 @@ type Model struct {
 	pet          string
 	petName      string
 
-	onboard *onboarding
-	welcome *bubbles.Welcome
+	onboard   *onboarding
+	welcome   *bubbles.Welcome
 	chat      *bubbles.Chat
 	thought   *bubbles.Thought
 	petBubble *bubbles.PetBubble
@@ -76,10 +77,16 @@ type Model struct {
 	mainVP    viewport.Model
 	showingVP bool
 
-	todoBubble *bubbles.TodoBubble
-	askBubble  *bubbles.AskBubble
-	toolPanel  *bubbles.ToolPanel
-	masonry    *MasonryManager
+	todoBubble    *bubbles.TodoBubble
+	askBubble     *bubbles.AskBubble
+	confirmBubble *bubbles.ConfirmBubble
+	toolPanel     *bubbles.ToolPanel
+	masonry       *MasonryManager
+
+	// confirmReqs carries shell-command approval requests from the agent's
+	// bash tool to the TUI. The agent goroutine blocks until the user decides.
+	confirmReqs    chan confirmRequest
+	pendingConfirm *confirmRequest
 
 	cmds  *commands.Registry
 	popup *cmdPopup
@@ -89,6 +96,7 @@ type Model struct {
 	appEvents <-chan any
 	thinking  bool
 	tick      int
+	ticking   bool // true once a tickCmd chain is running — prevents duplicates
 
 	// live token stream ticker
 	streamTicker string // latest token text, trimmed to one line
@@ -103,6 +111,18 @@ type tickMsg struct{}
 
 func tickCmd() tea.Cmd {
 	return tea.Tick(80*time.Millisecond, func(time.Time) tea.Msg { return tickMsg{} })
+}
+
+// startTick begins the animation tick chain, but only once. Spawning a second
+// chain doubles the render rate every time it happens; left unchecked across
+// state transitions it compounds into a render storm. Returns nil if a chain
+// is already running.
+func (m *Model) startTick() tea.Cmd {
+	if m.ticking {
+		return nil
+	}
+	m.ticking = true
+	return tickCmd()
 }
 
 type Options struct {
@@ -123,18 +143,36 @@ func New(ctx context.Context, session *agent.Session, opts Options) *Model {
 	ti.CharLimit = 4000
 
 	m := &Model{
-		ctx:       ctx,
-		session:   session,
-		db:        opts.RAGDB,
-		bus:       opts.Bus,
-		root:      opts.Root,
-		user:      opts.User,
-		version:   opts.Version,
-		appEvents: opts.Events,
-		input:     ti,
-		width:     80,
-		height:    24,
+		ctx:         ctx,
+		session:     session,
+		db:          opts.RAGDB,
+		bus:         opts.Bus,
+		root:        opts.Root,
+		user:        opts.User,
+		version:     opts.Version,
+		appEvents:   opts.Events,
+		input:       ti,
+		width:       80,
+		height:      24,
+		confirmReqs: make(chan confirmRequest),
 	}
+
+	// Install the bash confirmation gate: the agent's bash tool calls this
+	// from its goroutine, which blocks until the user answers in the TUI.
+	embedded.SetBashConfirmFunc(func(command, dir string) bool {
+		reply := make(chan bool, 1)
+		select {
+		case m.confirmReqs <- confirmRequest{command: command, dir: dir, reply: reply}:
+		case <-ctx.Done():
+			return false
+		}
+		select {
+		case ok := <-reply:
+			return ok
+		case <-ctx.Done():
+			return false
+		}
+	})
 
 	if opts.Loaded {
 		th := theme.ByName(opts.Existing.Theme)
@@ -172,6 +210,31 @@ type appEventMsg struct{ ev any }
 type streamClosedMsg struct{}
 type appEventsClosedMsg struct{}
 
+// confirmRequest is a shell-command approval request. The agent's bash tool
+// fills Command/Dir, sends the request to the TUI, then blocks on Reply until
+// the user decides.
+type confirmRequest struct {
+	command string
+	dir     string
+	reply   chan bool
+}
+
+type confirmReqMsg struct{ req confirmRequest }
+
+func (m *Model) waitConfirm() tea.Cmd {
+	ch := m.confirmReqs
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		req, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return confirmReqMsg{req: req}
+	}
+}
+
 func (m *Model) waitEvent() tea.Cmd {
 	ch := m.turn
 	if ch == nil {
@@ -202,9 +265,9 @@ func (m *Model) waitAppEvent() tea.Cmd {
 
 func (m *Model) Init() tea.Cmd {
 	if m.state == stateOnboarding {
-		return m.waitAppEvent()
+		return tea.Batch(m.waitAppEvent(), m.waitConfirm())
 	}
-	return tea.Batch(textinput.Blink, tickCmd(), m.waitAppEvent())
+	return tea.Batch(textinput.Blink, m.startTick(), m.waitAppEvent(), m.waitConfirm())
 }
 
 type SaveFunc func(s settings.Settings) error
@@ -272,7 +335,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateOnboarding(msg)
 		case stateWelcome:
 			m.enterChat()
-			return m, tea.Batch(textinput.Blink, tickCmd())
+			return m, tea.Batch(textinput.Blink, m.startTick())
 		case stateChat:
 			return m.updateChat(msg)
 		case stateUpload:
@@ -302,6 +365,23 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case appEventMsg:
 		m.routeAppEvent(msg.ev)
 		return m, m.waitAppEvent()
+
+	case confirmReqMsg:
+		req := msg.req
+		// A confirm is already on screen — reject the new request immediately
+		// rather than orphaning its goroutine. waitConfirm is NOT re-armed here;
+		// resolveConfirm re-arms it once the current request is decided, so at
+		// most one request is in flight at a time.
+		if m.pendingConfirm != nil {
+			req.reply <- false
+			return m, m.waitConfirm()
+		}
+		m.pendingConfirm = &req
+		m.confirmBubble = bubbles.NewConfirmBubble(m.theme, req.command, req.dir)
+		if m.state == stateChat {
+			m.input.Blur()
+		}
+		return m, nil
 	}
 
 	if m.state == stateChat {
@@ -365,6 +445,11 @@ func (m *Model) updateUpload(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *Model) updateChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
+	// Confirm bubble intercepts all input while a command awaits approval.
+	if m.confirmBubble != nil && !m.confirmBubble.Decided() {
+		return m.updateConfirm(msg)
+	}
+
 	// Ask bubble intercepts all input while active.
 	if m.askBubble != nil && !m.askBubble.Answered() {
 		return m.updateAsk(msg)
@@ -379,6 +464,12 @@ func (m *Model) updateChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "shift+tab":
 			m.masonry.FocusPrev()
 			return m, nil
+		case "esc":
+			// Unfocus any focused bubble and hand control back to the input.
+			if m.masonry.AnyFocused() {
+				m.masonry.ClearFocus()
+				return m, nil
+			}
 		case "x":
 			// Only intercept when a bubble is explicitly focused via tab.
 			if m.masonry.AnyFocused() && m.masonry.DismissFocused() {
@@ -527,6 +618,46 @@ func (m *Model) updateAsk(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *Model) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	cb := m.confirmBubble
+	switch msg.String() {
+	case "left", "h":
+		cb.MoveLeft()
+	case "right", "l", "tab":
+		cb.MoveRight()
+	case "y", "Y":
+		cb.SetApproved(true)
+		return m.resolveConfirm()
+	case "n", "N", "esc":
+		cb.SetApproved(false)
+		return m.resolveConfirm()
+	case "enter", " ":
+		cb.Confirm()
+		return m.resolveConfirm()
+	}
+	return m, nil
+}
+
+// resolveConfirm sends the user's decision back to the blocked bash tool and
+// dismisses the confirm bubble. It re-arms waitConfirm so the next queued
+// request can be received — this is the only place waitConfirm is re-armed
+// while a request was pending, which bounds in-flight confirms to one.
+func (m *Model) resolveConfirm() (tea.Model, tea.Cmd) {
+	cb := m.confirmBubble
+	if cb == nil || !cb.Decided() {
+		return m, nil
+	}
+	if m.pendingConfirm != nil {
+		m.pendingConfirm.reply <- cb.Approved()
+		m.pendingConfirm = nil
+	}
+	m.confirmBubble = nil
+	if m.state == stateChat {
+		m.input.Focus()
+	}
+	return m, m.waitConfirm()
+}
+
 func (m *Model) submitAskAnswer() (tea.Model, tea.Cmd) {
 	ask := m.askBubble
 	answer := ask.Answer()
@@ -553,6 +684,12 @@ func (m *Model) resetSession() {
 	m.showingVP = false
 	m.askBubble = nil
 	m.todoBubble = nil
+	// Release any blocked bash goroutine so it doesn't leak on reset.
+	if m.pendingConfirm != nil {
+		m.pendingConfirm.reply <- false
+		m.pendingConfirm = nil
+	}
+	m.confirmBubble = nil
 }
 
 func (m *Model) runCommand(input string) (quit bool) {
@@ -649,6 +786,23 @@ func (m *Model) runCommand(input string) (quit bool) {
 			}
 		}
 	}
+	if res.NewActiveDir != "" && m.masonry != nil {
+		project := filepath.Base(res.NewActiveDir)
+		m.masonry.FileTree().SetProject(project)
+		m.masonry.BuildStatus().SetProject(project)
+	}
+	if res.SpawnBubble != "" && m.masonry != nil {
+		switch res.SpawnBubble {
+		case "code":
+			m.masonry.NewCodeBubble()
+		case "filetree":
+			m.masonry.FileTree()
+		case "console":
+			m.masonry.Console()
+		case "buildstatus":
+			m.masonry.BuildStatus()
+		}
+	}
 	if res.Message != "" {
 		m.system = append(m.system, res.Message)
 	}
@@ -691,6 +845,13 @@ func (m *Model) route(ev agent.Event) {
 
 	case agent.CodeFenceEvent:
 		if m.masonry != nil {
+			// emitCodeFences re-scans the whole assistant buffer every loop
+			// step, so the same fence re-fires each step. Only spawn a new
+			// bubble for genuinely new content — otherwise the masonry would
+			// accumulate an unbounded stack of identical code bubbles.
+			if latest := m.masonry.LatestCode(); latest != nil && latest.Content() == e.Content {
+				break
+			}
 			code := m.masonry.NewCodeBubble()
 			code.UpdateFence(e.Lang, e.Content)
 		}
@@ -763,6 +924,16 @@ func (m *Model) routeAppEvent(ev any) {
 		if e.Stage == "error" && e.Err != nil {
 			m.masonry.Console().Done(e.Err.Error(), true)
 		}
+	case userToolResult:
+		if e.err != nil {
+			m.system = append(m.system, fmt.Sprintf("» tool %s failed: %s", e.name, sanitizeError(e.err)))
+		} else {
+			out := strings.TrimSpace(e.result)
+			if out == "" {
+				out = "(no output)"
+			}
+			m.system = append(m.system, fmt.Sprintf("» tool %s →\n%s", e.name, out))
+		}
 	case RAGIngestEvent:
 		switch e.Stage {
 		case "start":
@@ -797,13 +968,14 @@ func (m *Model) routeToolStart(e agent.ToolStartEvent) {
 		m.masonry.Console().Start("emulate")
 	case "flash":
 		m.masonry.Console().Start("flash")
-	case "workspace_init":
+	case "workspace_init", "cd":
 		bs := m.masonry.BuildStatus()
 		ft := m.masonry.FileTree()
 		if len(e.Args) > 0 {
 			if name, ok := e.Args[0].(string); ok {
-				bs.SetProject(name)
-				ft.SetProject(name)
+				project := filepath.Base(filepath.Clean(name))
+				bs.SetProject(project)
+				ft.SetProject(project)
 			}
 		}
 	case "workspace_status":
@@ -896,14 +1068,12 @@ func (m *Model) routeToolResult(e agent.ToolResultEvent) {
 				ft.AddFile(line)
 			}
 		}
-	case "workspace_init":
+	case "workspace_init", "cd":
 		if !failed {
-			args := m.toolPanel.LastCallArgs("workspace_init")
-			if len(args) > 0 {
-				if name, ok := args[0].(string); ok {
-					m.masonry.FileTree().SetProject(name)
-					m.masonry.BuildStatus().SetProject(name)
-				}
+			if dir := parseActivePath(result); dir != "" {
+				project := filepath.Base(dir)
+				m.masonry.FileTree().SetProject(project)
+				m.masonry.BuildStatus().SetProject(project)
 			}
 		}
 	case "workspace_status":
@@ -915,15 +1085,29 @@ func (m *Model) routeToolResult(e agent.ToolResultEvent) {
 	}
 }
 
+// parseActivePath extracts the directory from a workspace_init/cd result line
+// like "active project: /path" or "active directory: /path".
+func parseActivePath(result string) string {
+	for _, line := range strings.Split(result, "\n") {
+		line = strings.TrimSpace(line)
+		for _, prefix := range []string{"active project:", "active directory:"} {
+			if strings.HasPrefix(line, prefix) {
+				return strings.TrimSpace(strings.TrimPrefix(line, prefix))
+			}
+		}
+	}
+	return ""
+}
+
 func parseWorkspaceCurrent(result string) string {
 	for _, line := range strings.Split(result, "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "current project:") {
-			rest := strings.TrimSpace(strings.TrimPrefix(line, "current project:"))
+		if strings.HasPrefix(line, "current directory:") {
+			rest := strings.TrimSpace(strings.TrimPrefix(line, "current directory:"))
 			if rest == "" {
 				return ""
 			}
-			return strings.Fields(rest)[0]
+			return filepath.Base(rest)
 		}
 	}
 	return ""
@@ -995,6 +1179,9 @@ func (m *Model) chatView() string {
 		if m.askBubble != nil {
 			left = append(left, m.askBubble.View(leftW))
 		}
+		if m.confirmBubble != nil {
+			left = append(left, m.confirmBubble.View(leftW))
+		}
 		for _, s := range m.system {
 			left = append(left, sysStyle.Render("» "+s))
 		}
@@ -1031,6 +1218,9 @@ func (m *Model) chatView() string {
 		if m.askBubble != nil {
 			content = append(content, m.askBubble.View(w))
 		}
+		if m.confirmBubble != nil {
+			content = append(content, m.confirmBubble.View(w))
+		}
 		for _, s := range m.system {
 			content = append(content, sysStyle.Render("» "+s))
 		}
@@ -1055,7 +1245,9 @@ func (m *Model) chatView() string {
 		rows = append(rows, m.popup.View(m.theme, w))
 	}
 
-	if m.askBubble != nil && !m.askBubble.Answered() {
+	if m.confirmBubble != nil && !m.confirmBubble.Decided() {
+		rows = append(rows, hintStyle.Render("←→ move • enter confirm • y approve • n reject • ctrl+c quit"))
+	} else if m.askBubble != nil && !m.askBubble.Answered() {
 		rows = append(rows, hintStyle.Render("↑↓ navigate • enter select • ctrl+c quit"))
 	} else {
 		trustTag := "trusted"
@@ -1260,6 +1452,53 @@ func (m *Model) buildCommands() *commands.Registry {
 		},
 	})
 	r.Register(&commands.Command{
+		Name:        "cd",
+		Description: "change the active directory (absolute, ~-relative, or relative path)",
+		Run: func(args []string) commands.Result {
+			if len(args) == 0 {
+				return commands.Result{Message: "current directory: " + embedded.CurrentDir() + " (usage: /cd <path>)"}
+			}
+			dir, err := embedded.ChangeDir(strings.Join(args, " "))
+			if err != nil {
+				return commands.Result{Err: err}
+			}
+			return commands.Result{NewActiveDir: dir, Message: "active directory → " + dir}
+		},
+	})
+
+	r.Register(&commands.Command{
+		Name:        "tool",
+		Description: "run an agent tool directly: /tool <name> <arg1> <arg2> …",
+		ArgValues:   func() []string { return m.session.ToolNames() },
+		Run: func(args []string) commands.Result {
+			if len(args) == 0 {
+				return commands.Result{Message: "tools: " + strings.Join(m.session.ToolNames(), ", ") + " (usage: /tool <name> <args>)"}
+			}
+			go m.runToolDirect(args[0], args[1:])
+			return commands.Result{Message: "running tool: " + args[0] + " …"}
+		},
+	})
+
+	bubbleKinds := []string{"code", "filetree", "console", "buildstatus"}
+	r.Register(&commands.Command{
+		Name:        "bubble",
+		Description: "spawn a masonry bubble: code, filetree, console, buildstatus",
+		ArgValues:   func() []string { return bubbleKinds },
+		Run: func(args []string) commands.Result {
+			if len(args) == 0 {
+				return commands.Result{Message: "bubble kinds: " + strings.Join(bubbleKinds, ", ") + " (usage: /bubble <kind>)"}
+			}
+			kind := args[0]
+			for _, k := range bubbleKinds {
+				if k == kind {
+					return commands.Result{SpawnBubble: kind, Message: "spawned bubble: " + kind}
+				}
+			}
+			return commands.Result{Err: fmt.Errorf("unknown bubble kind: %s", kind)}
+		},
+	})
+
+	r.Register(&commands.Command{
 		Name:        "help",
 		Description: "list available commands",
 		Run: func(args []string) commands.Result {
@@ -1412,6 +1651,28 @@ func (m *Model) ingestFiles(files []string) {
 	}
 
 	m.bus.Publish(RAGIngestEvent{Stage: "done", Total: len(files)})
+}
+
+// userToolResult carries the outcome of a user-invoked tool (/tool) back to
+// the TUI so it can be rendered as a system line.
+type userToolResult struct {
+	name   string
+	result string
+	err    error
+}
+
+// runToolDirect executes a tool on behalf of the user (via /tool) off the UI
+// goroutine, then publishes the result. String args are passed as-is; the
+// tool's reflection layer coerces them to the right types.
+func (m *Model) runToolDirect(name string, args []string) {
+	tokens := make([]any, len(args))
+	for i, a := range args {
+		tokens[i] = a
+	}
+	result, _, err := m.session.RunTool(m.ctx, name, tokens)
+	if m.bus != nil {
+		m.bus.Publish(userToolResult{name: name, result: result, err: err})
+	}
 }
 
 func sanitizeError(err error) string {
