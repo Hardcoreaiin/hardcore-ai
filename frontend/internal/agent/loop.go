@@ -11,11 +11,18 @@ import (
 
 const DefaultMaxToolSteps = 10
 
-// historyResultMaxLen is the max bytes of a tool result kept in message
-// history. The TUI already shows the full output; the LLM only needs enough
-// to understand what happened. Large build logs would otherwise balloon every
-// subsequent LLM request and spike RAM.
+// historyResultMaxLen is the max bytes of a generic tool result kept in
+// message history. The TUI already shows the full output; the LLM only needs
+// enough to understand what happened. Large build logs would otherwise
+// balloon every subsequent LLM request and spike RAM.
 const historyResultMaxLen = 2000
+
+// fileReadMaxLines caps a file_read result by LINES, not bytes. The model must
+// see a file in full to edit it — file_edit anchors on exact lines, and a
+// byte cap would slice a line in half and break every anchor. Truncating on a
+// line boundary keeps anchors intact. 2000 lines covers any realistic
+// firmware file while still bounding context/RAM.
+const fileReadMaxLines = 2000
 
 // historyRawMaxLen caps how many bytes of raw assistant text are stored back
 // into history per step (includes THINK lines which can be very long).
@@ -118,6 +125,33 @@ func truncResult(s string) string {
 	return "[…truncated…]\n" + s[len(s)-historyResultMaxLen:]
 }
 
+// truncFileRead trims a file_read result on a LINE boundary. Unlike
+// truncResult it never slices mid-line, so the lines the model copies into a
+// file_edit before-block stay byte-exact. Only files past fileReadMaxLines are
+// touched — realistic firmware files pass through whole.
+func truncFileRead(s string) string {
+	if s == "" {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) <= fileReadMaxLines {
+		return s
+	}
+	kept := strings.Join(lines[:fileReadMaxLines], "\n")
+	omitted := len(lines) - fileReadMaxLines
+	return kept + fmt.Sprintf("\n[…%d more line(s) not shown — read a specific range if you need them…]", omitted)
+}
+
+// resultForHistory picks the right truncation for a tool result based on which
+// tool produced it. file_read keeps whole source files (line-capped); every
+// other tool gets the small byte cap suited to status/log output.
+func resultForHistory(toolName, result string) string {
+	if toolName == "file_read" {
+		return truncFileRead(result)
+	}
+	return truncResult(result)
+}
+
 // truncRaw trims the raw assistant buffer stored in history to historyRawMaxLen.
 func truncRaw(s string) string {
 	if len(s) <= historyRawMaxLen {
@@ -170,6 +204,19 @@ func (l *Loop) runTurn(ctx context.Context, msgs *[]llm.Message, emit func(Event
 			}
 			rawBuf.WriteString(line.Text)
 
+			// A line inside a ``` fence is code content (a file body, or a
+			// file_edit before/after block) — never a directive. Parsing it
+			// would let firmware like `delay(500);` be misread as a tool CALL
+			// and clobber the real pendingCall. Track the fence toggle here,
+			// before classification, and skip parsing for fenced lines.
+			if strings.HasPrefix(strings.TrimSpace(line.Text), "```") {
+				inFence = !inFence
+				continue
+			}
+			if inFence {
+				continue
+			}
+
 			pl := ParseLine(line.Text)
 			switch pl.Kind {
 			case LineThink:
@@ -209,18 +256,10 @@ func (l *Loop) runTurn(ctx context.Context, msgs *[]llm.Message, emit func(Event
 				}
 				break
 			default:
-				// Track code fences so their content is NOT emitted as
-				// LineEvents (which would show up in the pet/chat output).
-				// The full fence is handled after the step via emitCodeFences.
-				trimmed := strings.TrimSpace(line.Text)
-				if strings.HasPrefix(trimmed, "```") {
-					inFence = !inFence
-					// Skip the delimiter line itself.
-				} else if inFence {
-					// Inside a fence — skip; CodeFenceEvent handles display.
-				} else {
-					pendingLines = append(pendingLines, LineEvent{Text: line.Text})
-				}
+				// Plain prose line (fenced lines were already filtered out
+				// above). Fence content is rendered via CodeFenceEvent, not
+				// as LineEvents, so the pet/chat view stays clean.
+				pendingLines = append(pendingLines, LineEvent{Text: line.Text})
 			}
 			if pendingAsk != nil {
 				break
@@ -248,15 +287,23 @@ func (l *Loop) runTurn(ctx context.Context, msgs *[]llm.Message, emit func(Event
 			return true
 		}
 
-		// Scan full buffer for code fences (``` ... ```) and emit them.
-		emitCodeFences(assistantRaw, emit)
-
 		// If per-line parsing missed the CALL (e.g. multi-line argument like
 		// file_write content), scan the full buffer now.
 		if pendingCall == nil {
 			if pl := ParseFullText(assistantRaw); pl.Kind == LineCall {
 				pendingCall = &pl
 			}
+		}
+
+		// Scan full buffer for code fences (``` ... ```) and emit them as
+		// snippet bubbles — UNLESS this response is a file_write or file_edit
+		// call, whose fences are the tool's payload (file body / edit pairs),
+		// not standalone snippets. file_write renders a diff via ToolStart;
+		// file_edit renders one via its file_diff artifact.
+		fenceIsToolPayload := pendingCall != nil &&
+			(pendingCall.FuncName == "file_write" || pendingCall.FuncName == "file_edit")
+		if !fenceIsToolPayload {
+			emitCodeFences(assistantRaw, emit)
 		}
 
 		// Heredoc convention: file_write may be called with only a path, with
@@ -266,6 +313,16 @@ func (l *Loop) runTurn(ctx context.Context, msgs *[]llm.Message, emit func(Event
 		if pendingCall != nil && pendingCall.FuncName == "file_write" && len(pendingCall.Tokens) == 1 {
 			if body, ok := firstFenceBody(assistantRaw); ok {
 				pendingCall.Tokens = append(pendingCall.Tokens, body)
+			}
+		}
+
+		// file_edit("path") is followed by paired before/after ``` blocks.
+		// Hand the whole post-CALL text to the tool as the edits argument;
+		// editmatch.ParseEdits pulls the fence pairs out of it. This keeps the
+		// before/after code (with quotes, parens, newlines) out of the tokenizer.
+		if pendingCall != nil && pendingCall.FuncName == "file_edit" && len(pendingCall.Tokens) == 1 {
+			if edits, ok := fencesAfterCall(assistantRaw, pendingCall.Text); ok {
+				pendingCall.Tokens = append(pendingCall.Tokens, edits)
 			}
 		}
 
@@ -345,7 +402,7 @@ func (l *Loop) runTurn(ctx context.Context, msgs *[]llm.Message, emit func(Event
 
 		*msgs = append(*msgs,
 			llm.Message{Role: llm.RoleAssistant, Content: truncRaw(assistantRaw)},
-			llm.Message{Role: llm.RoleUser, Content: "Tool result: " + truncResult(resultStr)},
+			llm.Message{Role: llm.RoleUser, Content: "Tool result: " + resultForHistory(pc.FuncName, resultStr)},
 		)
 		trimHistory(msgs)
 	}
@@ -483,6 +540,22 @@ func firstFenceBody(text string) (string, bool) {
 		return "", false
 	}
 	return content + "\n", true
+}
+
+// fencesAfterCall returns the slice of text that follows the file_edit CALL
+// line, which holds the before/after ``` fence pairs. callText is the matched
+// call expression (e.g. `file_edit("main.c")`); everything after its first
+// occurrence is the edits payload. Returns false if no ``` block follows.
+func fencesAfterCall(text, callText string) (string, bool) {
+	idx := strings.Index(text, callText)
+	if idx == -1 {
+		return "", false
+	}
+	after := text[idx+len(callText):]
+	if !strings.Contains(after, "```") {
+		return "", false
+	}
+	return after, true
 }
 
 // SwapClient replaces the underlying LLM client for future turns.

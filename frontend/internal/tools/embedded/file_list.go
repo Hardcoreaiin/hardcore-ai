@@ -21,11 +21,23 @@ func RegisterFileList(r *tools.Registry) {
 			}
 			var files []string
 			err = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-				if err != nil || info.IsDir() {
+				if err != nil {
 					return err
 				}
-				rel, _ := filepath.Rel(root, path)
-				files = append(files, filepath.ToSlash(rel))
+				relRaw, _ := filepath.Rel(root, path)
+				rel := filepath.ToSlash(relRaw)
+				// Skip build output and the generated firmware runtime — they
+				// are not the user's source and must not be edited by hand.
+				if rel == "build" || rel == runtimeDirName {
+					if info.IsDir() {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+				if info.IsDir() {
+					return nil
+				}
+				files = append(files, rel)
 				return nil
 			})
 			if err != nil {

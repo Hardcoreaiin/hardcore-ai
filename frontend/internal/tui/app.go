@@ -905,6 +905,15 @@ func (m *Model) routeArtifact(e agent.ArtifactEvent) {
 				m.masonry.BuildStatus().SetProject(project)
 			}
 		}
+	case "file_diff":
+		// file_edit emits the before/after content of the file it patched.
+		// Render it in its own code bubble as a diff so the precise change
+		// is visible, just like a file_write.
+		if d, ok := e.Artifact.Payload.(embedded.FileDiff); ok {
+			code := m.masonry.NewCodeBubble()
+			code.UpdateDiff(d.Path, d.New, d.Old)
+			m.masonry.FileTree().AddFile(d.Path)
+		}
 	}
 }
 

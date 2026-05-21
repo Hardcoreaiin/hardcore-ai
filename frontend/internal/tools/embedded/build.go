@@ -128,9 +128,24 @@ func RegisterBuild(r *tools.Registry, mgr *toolchain.Manager) {
 				})
 			}
 
+			// Drop any source under the generated runtime dir — it is added
+			// back explicitly below so a stale copy can't be double-compiled.
+			filtered := sources[:0]
+			for _, s := range sources {
+				rel, _ := filepath.Rel(root, s)
+				if strings.HasPrefix(filepath.ToSlash(rel), runtimeDirName+"/") {
+					continue
+				}
+				filtered = append(filtered, s)
+			}
+			sources = filtered
+
 			if len(sources) == 0 {
 				return "no .c files found in project", nil, nil
 			}
+			// Count of files the user actually wrote, before runtime sources
+			// are appended — used for an honest "compiled N file(s)" message.
+			userFileCount := len(sources)
 
 			args := append(profile.flags,
 				"-nostdlib",
@@ -141,6 +156,22 @@ func RegisterBuild(r *tools.Registry, mgr *toolchain.Manager) {
 				"-I", root,
 				"-o", elfPath,
 			)
+
+			// If this arch has a runtime profile, generate the linker script,
+			// Cortex-M startup, and semihosting I/O, and link them in. Without
+			// this the ELF has no vector table or reset handler and QEMU
+			// faults immediately — emulation would print nothing.
+			var runtimeNote string
+			if rprof, ok := RuntimeProfileFor(arch); ok {
+				rtDir, extraSrc, linkerScript, gerr := GenerateRuntime(root, rprof)
+				if gerr != nil {
+					return "", nil, fmt.Errorf("runtime generation failed: %w", gerr)
+				}
+				args = append(args, "-I", rtDir, "-T", linkerScript)
+				sources = append(sources, extraSrc...)
+				runtimeNote = fmt.Sprintf(" — linked for %s; #include \"hcai.h\" for LOG()", rprof.CPUName)
+			}
+
 			args = append(args, sources...)
 
 			cmd := exec.CommandContext(ctx, compiler, args...)
@@ -159,7 +190,7 @@ func RegisterBuild(r *tools.Registry, mgr *toolchain.Manager) {
 				return "BUILD FAILED:\n" + output, nil, nil
 			}
 
-			result := fmt.Sprintf("OK: compiled %d file(s) → build/%s.elf", len(sources), arch)
+			result := fmt.Sprintf("OK: compiled %d file(s) → build/%s.elf%s", userFileCount, arch, runtimeNote)
 			if output != "" {
 				result += "\nWarnings:\n" + output
 			}

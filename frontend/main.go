@@ -56,6 +56,7 @@ func main() {
 	embedded.RegisterWorkspaceStatus(reg)
 	embedded.RegisterCD(reg)
 	embedded.RegisterFileWrite(reg)
+	embedded.RegisterFileEdit(reg)
 	embedded.RegisterFileRead(reg)
 	embedded.RegisterFileList(reg)
 	embedded.RegisterFileSearch(reg)
