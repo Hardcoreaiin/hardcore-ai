@@ -11,6 +11,21 @@ import (
 
 const DefaultMaxToolSteps = 10
 
+// historyResultMaxLen is the max bytes of a tool result kept in message
+// history. The TUI already shows the full output; the LLM only needs enough
+// to understand what happened. Large build logs would otherwise balloon every
+// subsequent LLM request and spike RAM.
+const historyResultMaxLen = 2000
+
+// historyRawMaxLen caps how many bytes of raw assistant text are stored back
+// into history per step (includes THINK lines which can be very long).
+const historyRawMaxLen = 4000
+
+// maxHistoryMessages is the total number of messages (excluding the system
+// prompt) kept in history. Older message pairs are dropped when exceeded so
+// the context window and RAM stay bounded across long sessions.
+const maxHistoryMessages = 40
+
 type Config struct {
 	MaxToolSteps int
 }
@@ -58,6 +73,39 @@ func (l *Loop) Run(ctx context.Context, userPrompt string) <-chan Event {
 	return out
 }
 
+// trimHistory keeps the message slice bounded. It preserves the system prompt
+// (always msgs[0]) and the most recent maxHistoryMessages messages, dropping
+// the oldest pairs first. Non-destructive when under the limit.
+func trimHistory(msgs *[]llm.Message) {
+	if len(*msgs) <= 1+maxHistoryMessages {
+		return
+	}
+	// Keep msgs[0] (system) + the last maxHistoryMessages entries.
+	tail := (*msgs)[len(*msgs)-maxHistoryMessages:]
+	newMsgs := make([]llm.Message, 1, 1+len(tail))
+	newMsgs[0] = (*msgs)[0] // system prompt
+	newMsgs = append(newMsgs, tail...)
+	*msgs = newMsgs
+}
+
+// truncResult trims a tool-result string to historyResultMaxLen so large build
+// logs don't bloat the message history that gets re-sent to the LLM every step.
+func truncResult(s string) string {
+	if len(s) <= historyResultMaxLen {
+		return s
+	}
+	// Keep the tail — errors are usually at the end of build output.
+	return "[…truncated…]\n" + s[len(s)-historyResultMaxLen:]
+}
+
+// truncRaw trims the raw assistant buffer stored in history to historyRawMaxLen.
+func truncRaw(s string) string {
+	if len(s) <= historyRawMaxLen {
+		return s
+	}
+	return s[:historyRawMaxLen] + "\n[…truncated…]"
+}
+
 // runTurn executes the THINK/CALL state machine against the given message
 // history, appending assistant/tool turns to msgs in place. Returns true if
 // it already emitted TurnEndEvent (ASK suspension), false otherwise.
@@ -73,6 +121,7 @@ func (l *Loop) runTurn(ctx context.Context, msgs *[]llm.Message, emit func(Event
 		var pendingCall *ParsedLine
 		var pendingAsk *AskEvent
 		var pendingLines []LineEvent
+		var inFence bool // true while inside a ``` code fence
 
 		for line := range lines {
 			if line.Done {
@@ -127,7 +176,18 @@ func (l *Loop) runTurn(ctx context.Context, msgs *[]llm.Message, emit func(Event
 				}
 				break
 			default:
-				pendingLines = append(pendingLines, LineEvent{Text: line.Text})
+				// Track code fences so their content is NOT emitted as
+				// LineEvents (which would show up in the pet/chat output).
+				// The full fence is handled after the step via emitCodeFences.
+				trimmed := strings.TrimSpace(line.Text)
+				if strings.HasPrefix(trimmed, "```") {
+					inFence = !inFence
+					// Skip the delimiter line itself.
+				} else if inFence {
+					// Inside a fence — skip; CodeFenceEvent handles display.
+				} else {
+					pendingLines = append(pendingLines, LineEvent{Text: line.Text})
+				}
 			}
 			if pendingAsk != nil {
 				break
@@ -167,12 +227,12 @@ func (l *Loop) runTurn(ctx context.Context, msgs *[]llm.Message, emit func(Event
 			// to start executing instead of stopping.
 			if strings.Contains(strings.ToUpper(assistantRaw), "TODO:") {
 				*msgs = append(*msgs,
-					llm.Message{Role: llm.RoleAssistant, Content: assistantRaw},
+					llm.Message{Role: llm.RoleAssistant, Content: truncRaw(assistantRaw)},
 					llm.Message{Role: llm.RoleUser, Content: "Good plan. Now execute it — start with the first step immediately using a CALL."},
 				)
 				continue
 			}
-			*msgs = append(*msgs, llm.Message{Role: llm.RoleAssistant, Content: assistantRaw})
+			*msgs = append(*msgs, llm.Message{Role: llm.RoleAssistant, Content: truncRaw(assistantRaw)})
 			emit(DoneEvent{})
 			return false
 		}
@@ -182,9 +242,10 @@ func (l *Loop) runTurn(ctx context.Context, msgs *[]llm.Message, emit func(Event
 			resultStr := "ERROR: " + pc.Err.Error()
 			emit(ToolResultEvent{Name: pc.FuncName, Result: resultStr})
 			*msgs = append(*msgs,
-				llm.Message{Role: llm.RoleAssistant, Content: assistantRaw},
-				llm.Message{Role: llm.RoleUser, Content: "Tool result: " + resultStr},
+				llm.Message{Role: llm.RoleAssistant, Content: truncRaw(assistantRaw)},
+				llm.Message{Role: llm.RoleUser, Content: "Tool result: " + truncResult(resultStr)},
 			)
+			trimHistory(msgs)
 			continue
 		}
 
@@ -193,9 +254,10 @@ func (l *Loop) runTurn(ctx context.Context, msgs *[]llm.Message, emit func(Event
 			resultStr := fmt.Sprintf("ERROR: unknown tool %q", pc.FuncName)
 			emit(ToolResultEvent{Name: pc.FuncName, Result: resultStr})
 			*msgs = append(*msgs,
-				llm.Message{Role: llm.RoleAssistant, Content: assistantRaw},
-				llm.Message{Role: llm.RoleUser, Content: "Tool result: " + resultStr},
+				llm.Message{Role: llm.RoleAssistant, Content: truncRaw(assistantRaw)},
+				llm.Message{Role: llm.RoleUser, Content: "Tool result: " + truncResult(resultStr)},
 			)
+			trimHistory(msgs)
 			continue
 		}
 
@@ -216,9 +278,10 @@ func (l *Loop) runTurn(ctx context.Context, msgs *[]llm.Message, emit func(Event
 		}
 
 		*msgs = append(*msgs,
-			llm.Message{Role: llm.RoleAssistant, Content: assistantRaw},
-			llm.Message{Role: llm.RoleUser, Content: "Tool result: " + resultStr},
+			llm.Message{Role: llm.RoleAssistant, Content: truncRaw(assistantRaw)},
+			llm.Message{Role: llm.RoleUser, Content: "Tool result: " + truncResult(resultStr)},
 		)
+		trimHistory(msgs)
 	}
 
 	emit(StepLimitEvent{Limit: l.cfg.MaxToolSteps})

@@ -7,6 +7,7 @@ import (
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/agent"
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/bubbles"
 	"github.com/Hardcoreaiin/hardcore-ai/frontend/internal/theme"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -20,6 +21,11 @@ type themeable interface {
 	SetTheme(*theme.Theme)
 }
 
+// scrollable is implemented by bubbles that accept keyboard scroll events.
+type scrollable interface {
+	Scroll(msg tea.Msg)
+}
+
 // BubbleID is a stable identifier for a masonry slot.
 type BubbleID struct {
 	Kind string
@@ -31,6 +37,7 @@ type masonryEntry struct {
 	bubble    bubbles.Bubble
 	dismissed bool
 	focused   bool
+	minimized bool
 }
 
 // MasonryManager owns all right-panel bubbles and produces a dynamic masonry layout.
@@ -102,7 +109,8 @@ func (m *MasonryManager) newBubble(kind string) bubbles.Bubble {
 	case "console":
 		return bubbles.NewConsoleBubble(m.theme)
 	default:
-		panic("unknown masonry kind: " + kind)
+		// Return a no-op placeholder rather than panicking the whole TUI.
+		return bubbles.NewErrorBubble(m.theme, "unknown kind: "+kind)
 	}
 }
 
@@ -170,13 +178,51 @@ func (m *MasonryManager) FocusPrev() {
 	live[(cur-1+len(live))%len(live)].focused = true
 }
 
+// AnyFocused reports whether any active bubble currently has keyboard focus.
+// Used by the TUI to gate m/x/- keys so they don't fire while the user is
+// typing a prompt.
+func (m *MasonryManager) AnyFocused() bool {
+	for _, e := range m.entries {
+		if e.focused && !e.dismissed {
+			return true
+		}
+	}
+	return false
+}
+
 // DismissFocused removes the focused bubble. Returns true if one was dismissed.
+// Only acts when a bubble has explicit focus (via tab) — never auto-focuses.
 func (m *MasonryManager) DismissFocused() bool {
 	for _, e := range m.entries {
 		if e.focused && !e.dismissed {
 			e.dismissed = true
 			e.focused = false
 			return true
+		}
+	}
+	return false
+}
+
+// ToggleMinimizeFocused toggles minimized state of the focused bubble.
+// Only acts when a bubble has explicit focus (via tab) — never auto-focuses.
+func (m *MasonryManager) ToggleMinimizeFocused() bool {
+	for _, e := range m.entries {
+		if e.focused && !e.dismissed {
+			e.minimized = !e.minimized
+			return true
+		}
+	}
+	return false
+}
+
+// UpdateFocused passes a tea.Msg to the focused bubble. Returns true if handled.
+func (m *MasonryManager) UpdateFocused(msg tea.Msg) bool {
+	for _, e := range m.entries {
+		if e.focused && !e.dismissed {
+			if s, ok := e.bubble.(scrollable); ok {
+				s.Scroll(msg)
+				return true
+			}
 		}
 	}
 	return false
@@ -191,7 +237,10 @@ func (m *MasonryManager) ClearFocus() {
 
 // View renders all active bubbles into a masonry grid within rightW columns.
 func (m *MasonryManager) View(rightW int, tick int) string {
-	const minBubbleWidth = 36
+	// Minimum bubble width large enough for readable code diffs.
+	// Capped at 2 columns max so code/diff bubbles are never squeezed below ~60 chars.
+	const minBubbleWidth = 62
+	const maxCols = 2
 
 	live := m.active()
 	if len(live) == 0 {
@@ -201,6 +250,9 @@ func (m *MasonryManager) View(rightW int, tick int) string {
 	nCols := rightW / minBubbleWidth
 	if nCols < 1 {
 		nCols = 1
+	}
+	if nCols > maxCols {
+		nCols = maxCols
 	}
 	if nCols > len(live) {
 		nCols = len(live)
@@ -223,10 +275,6 @@ func (m *MasonryManager) View(rightW int, tick int) string {
 // safeView calls bubble.View() inside a recover so a panicking bubble cannot
 // crash the TUI. It also injects the dismiss hint when the entry is focused.
 func safeView(e *masonryEntry, width int, tick int, t *theme.Theme) (result string) {
-	if tk, ok := e.bubble.(tickable); ok {
-		tk.Tick(tick)
-	}
-
 	defer func() {
 		if r := recover(); r != nil {
 			result = lipgloss.NewStyle().
@@ -238,14 +286,46 @@ func safeView(e *masonryEntry, width int, tick int, t *theme.Theme) (result stri
 		}
 	}()
 
-	result = e.bubble.View(width)
+	// Tick inside the recover region so panicking tickables can't escape.
+	if tk, ok := e.bubble.(tickable); ok && !e.minimized {
+		tk.Tick(tick)
+	}
+
+	var inner string
+	if e.minimized {
+		title := lipgloss.NewStyle().Foreground(t.Accent).Bold(true).Render(e.bubble.Title())
+		inner = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(t.BorderMuted).
+			Padding(0, 1).
+			Width(width - 2).
+			Render(title + lipgloss.NewStyle().Foreground(t.Muted).Render(" (minimized — press m to expand)"))
+	} else {
+		inner = e.bubble.View(width)
+	}
+
+	// Controls: show actionable keys only when focused (they require tab first).
+	// Unfocused bubbles show a dim 'tab to focus' hint instead.
+	var ctrls string
+	if e.focused {
+		ctrlsStr := "m:min  x:close"
+		if e.minimized {
+			ctrlsStr = "m:expand  x:close"
+		}
+		ctrls = lipgloss.NewStyle().Foreground(t.Accent).Bold(true).Render("▸ " + ctrlsStr)
+	} else {
+		ctrls = lipgloss.NewStyle().Foreground(t.Muted).Italic(true).Render("tab to focus")
+	}
+	header := lipgloss.NewStyle().Width(width - 2).Align(lipgloss.Right).Render(ctrls)
+	
+	result = lipgloss.JoinVertical(lipgloss.Top, header, inner)
 
 	if e.focused {
 		focusStyle := lipgloss.NewStyle().
 			Border(lipgloss.ThickBorder()).
 			BorderForeground(t.Accent).
 			Width(width - 2)
-		hint := lipgloss.NewStyle().Foreground(t.Muted).Render("  tab next • x dismiss")
+		hint := lipgloss.NewStyle().Foreground(t.Muted).Render("  tab next • x close • m minimize/expand")
 		result = focusStyle.Render(strings.TrimRight(result, "\n") + "\n" + hint)
 	}
 
@@ -266,6 +346,32 @@ func (m *MasonryManager) FileTree() *bubbles.FileTreeBubble {
 	return m.Activate("filetree").bubble.(*bubbles.FileTreeBubble)
 }
 
+// Code returns the current (latest) CodeBubble, creating one if absent.
 func (m *MasonryManager) Code() *bubbles.CodeBubble {
 	return m.Activate("code").bubble.(*bubbles.CodeBubble)
+}
+
+// LatestCode returns the most recently added (non-dismissed) code bubble,
+// or nil if none exists. Used to update the bubble that was just created
+// by NewCodeBubble without creating another one.
+func (m *MasonryManager) LatestCode() *bubbles.CodeBubble {
+	for i := len(m.entries) - 1; i >= 0; i-- {
+		e := m.entries[i]
+		if e.id.Kind == "code" && !e.dismissed {
+			return e.bubble.(*bubbles.CodeBubble)
+		}
+	}
+	return nil
+}
+
+// NewCodeBubble creates a fresh CodeBubble entry in its own masonry slot so
+// each file_write is shown as a separate bubble instead of overwriting one.
+func (m *MasonryManager) NewCodeBubble() *bubbles.CodeBubble {
+	m.gens["code"]++
+	bubble := bubbles.NewCodeBubble(m.theme)
+	m.entries = append(m.entries, &masonryEntry{
+		id:     BubbleID{Kind: "code", Gen: m.gens["code"]},
+		bubble: bubble,
+	})
+	return bubble
 }
