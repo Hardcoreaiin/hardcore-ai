@@ -1,30 +1,24 @@
-# VS Code
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
 .vscode/*
 !.vscode/extensions.json
-!.vscode/settings.json
-!.vscode/launch.json
-
-# Node.js
-node_modules/
-dist/
-out/
-# *.vsix (Removed from ignore to allow GitHub distribution)
-
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-.venv/
-env/
-venv/
-ENV/
-.env
-
-# Extension specific
-extension/dist/
-extension/out/
-extension/backend/.venv/
-
-# Hardware traces
-auto_fault.json
-*.log
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
